@@ -21,6 +21,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -31,6 +32,17 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.outlined.AttachFile
+import androidx.compose.material.icons.outlined.Explore
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.automirrored.outlined.Help
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -53,6 +65,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.draw.clip
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -64,6 +77,7 @@ import okio.ByteString
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlin.math.min
 
@@ -625,23 +639,43 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
     }
 
     MaterialTheme(colorScheme = if (isSystemInDarkTheme()) PiDarkColors else PiLightColors) {
-        Scaffold(
-            topBar = {
-                BrandedTopBar(
+        val scope = rememberCoroutineScope()
+        val drawerState = rememberDrawerState(DrawerValue.Closed)
+        ModalNavigationDrawer(
+            drawerState = drawerState,
+            drawerContent = {
+                AppDrawerContent(
                     connected = connected,
                     connecting = connecting,
-                    showSettings = showSettings,
+                    sessionInfo = sessionInfo,
                     onConnect = { connect() },
                     onDisconnect = ::disconnect,
-                    onToggleSettings = { showSettings = !showSettings },
+                    onScanSessions = ::scanSessions,
+                    scanningSessions = scanningSessions,
+                    onCopyLatest = { copyText("Assistant", latestAssistantText()) },
                     onClear = {
                         messages.clear()
                         activeAssistantId = null
                         activeToolMessages.clear()
                     },
-                    onCopyLatest = { copyText("Assistant", latestAssistantText()) },
-                    onScanSessions = ::scanSessions,
-                    scanningSessions = scanningSessions,
+                    onCloseDrawer = { scope.launch { drawerState.close() } },
+                )
+            },
+        ) {
+        Scaffold(
+            topBar = {
+                MinimalTopBar(
+                    connected = connected,
+                    connecting = connecting,
+                    modelLabel = modelLabel(sessionInfo),
+                    onOpenDrawer = { scope.launch { drawerState.open() } },
+                    onNewChat = {
+                        messages.clear()
+                        activeAssistantId = null
+                        activeToolMessages.clear()
+                        input = ""
+                    },
+                    onOpenSettings = { showSettings = true },
                 )
             }
         ) { padding ->
@@ -650,79 +684,19 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                     .padding(padding)
                     .imePadding()
                     .navigationBarsPadding()
-                    .padding(12.dp)
                     .fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                StatusPanel(status = status, connected = connected, working = working, sessionInfo = sessionInfo)
-
-                if (!connected || showSettings) {
-                    if (connected && showSettings) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text("Settings", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
-                            TextButton(onClick = { showSettings = false }) { Text("Close") }
-                        }
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        OutlinedTextField(host, { host = it }, label = { Text("Host") }, modifier = Modifier.weight(1f), singleLine = true)
-                        OutlinedTextField(port, { port = it }, label = { Text("Port") }, modifier = Modifier.width(100.dp), singleLine = true)
-                    }
-                    OutlinedTextField(
-                        value = token,
-                        onValueChange = { token = it },
-                        label = { Text("Token") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                        visualTransformation = if (showToken) VisualTransformation.None else PasswordVisualTransformation(),
-                        trailingIcon = {
-                            TextButton(onClick = { showToken = !showToken }) { Text(if (showToken) "Hide" else "Show") }
-                        },
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { saveConnectionSettings(); addMessage(ChatKind.System, "Saved", "Connection settings saved") }) { Text("Save") }
-                        OutlinedButton(onClick = {
-                            qrScanner.launch(
-                                ScanOptions()
-                                    .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                                    .setPrompt("Scan Pi Remote QR")
-                                    .setBeepEnabled(false)
-                                    .setOrientationLocked(false)
-                            )
-                        }) { Text("Scan QR") }
-                    }
-                    SettingsSwitchRow(
-                        title = "Auto-send shared content",
-                        subtitle = "When opened from Android Share",
-                        checked = autoSendShared,
-                        onCheckedChange = {
-                            autoSendShared = it
-                            prefs.edit().putBoolean("autoSendShared", it).apply()
-                        },
-                    )
-                    SettingsSwitchRow(
-                        title = "Keep screen awake",
-                        subtitle = "While connected",
-                        checked = keepAwake,
-                        onCheckedChange = {
-                            keepAwake = it
-                            prefs.edit().putBoolean("keepAwake", it).apply()
-                        },
-                    )
-                }
-
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
                 ) {
                     if (messages.isEmpty()) {
-                        EmptyState(
-                            text = if (working) "Waiting for Pi output…" else "Output will appear here",
+                        WelcomeScreen(
+                            working = working,
                             modifier = Modifier.align(Alignment.Center),
+                            onSuggest = { suggestion -> input = suggestion },
                         )
                     }
                     LazyColumn(
@@ -785,6 +759,49 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                 )
             }
         }
+        }
+
+        if (showSettings) {
+            SettingsSheet(
+                host = host,
+                onHostChange = { host = it },
+                port = port,
+                onPortChange = { port = it },
+                token = token,
+                onTokenChange = { token = it },
+                showToken = showToken,
+                onToggleShowToken = { showToken = !showToken },
+                autoSendShared = autoSendShared,
+                onAutoSendSharedChange = {
+                    autoSendShared = it
+                    prefs.edit().putBoolean("autoSendShared", it).apply()
+                },
+                keepAwake = keepAwake,
+                onKeepAwakeChange = {
+                    keepAwake = it
+                    prefs.edit().putBoolean("keepAwake", it).apply()
+                },
+                connected = connected,
+                connecting = connecting,
+                status = status,
+                onSave = {
+                    saveConnectionSettings()
+                    addMessage(ChatKind.System, "Saved", "Connection settings saved")
+                },
+                onScanQr = {
+                    qrScanner.launch(
+                        ScanOptions()
+                            .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                            .setPrompt("Scan Pi Remote QR")
+                            .setBeepEnabled(false)
+                            .setOrientationLocked(false)
+                    )
+                },
+                onConnect = { connect() },
+                onDisconnect = ::disconnect,
+                onDismiss = { showSettings = false },
+            )
+        }
     }
 
     DisposableEffect(Unit) {
@@ -813,74 +830,240 @@ private fun scheduleReconnect(
     }, delayMs)
 }
 
+private fun modelLabel(sessionInfo: String): String {
+    val parts = sessionInfo.split("•").map { it.trim() }
+    return if (parts.size >= 2) parts[1] else if (sessionInfo.isNotBlank()) sessionInfo else "Not connected"
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun BrandedTopBar(
+private fun MinimalTopBar(
     connected: Boolean,
     connecting: Boolean,
-    showSettings: Boolean,
-    onConnect: () -> Unit,
-    onDisconnect: () -> Unit,
-    onToggleSettings: () -> Unit,
-    onClear: () -> Unit,
-    onCopyLatest: () -> Unit,
-    onScanSessions: () -> Unit,
-    scanningSessions: Boolean,
+    modelLabel: String,
+    onOpenDrawer: () -> Unit,
+    onNewChat: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
-    var menuOpen by remember { mutableStateOf(false) }
     TopAppBar(
+        navigationIcon = {
+            IconButton(onClick = onOpenDrawer) {
+                Icon(Icons.Filled.Menu, contentDescription = "Menu")
+            }
+        },
         title = {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Box(
                     modifier = Modifier
-                        .size(34.dp)
-                        .clip(RoundedCornerShape(11.dp))
-                        .background(Brush.linearGradient(listOf(PiGreenDark, PiTeal))),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Image(
-                        painter = painterResource(id = R.drawable.ic_pi_remote),
-                        contentDescription = null,
-                        modifier = Modifier.size(30.dp),
-                    )
-                }
-                Column {
-                    Text("π Remote", style = MaterialTheme.typography.titleLarge)
-                    Text("Live Pi session control", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
-                }
+                        .size(9.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(
+                            when {
+                                connected -> PiGreen
+                                connecting -> PiAmber
+                                else -> MaterialTheme.colorScheme.error
+                            }
+                        ),
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    when {
+                        connecting -> "Connecting…"
+                        connected -> modelLabel
+                        else -> "Offline"
+                    },
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         },
         actions = {
-            Box {
-                TextButton(onClick = { menuOpen = true }) { Text("☰", style = MaterialTheme.typography.titleLarge) }
-                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    if (connected) {
-                        DropdownMenuItem(text = { Text("Disconnect") }, onClick = { menuOpen = false; onDisconnect() })
-                    } else {
-                        DropdownMenuItem(
-                            text = { Text(if (connecting) "Connecting…" else "Connect") },
-                            enabled = !connecting,
-                            onClick = { menuOpen = false; onConnect() },
-                        )
-                    }
-                    DropdownMenuItem(
-                        text = { Text(if (showSettings) "Hide settings" else "Settings") },
-                        onClick = { menuOpen = false; onToggleSettings() },
-                    )
-                    DropdownMenuItem(
-                        text = { Text(if (scanningSessions) "Scanning…" else "Sessions") },
-                        enabled = !scanningSessions,
-                        onClick = { menuOpen = false; onScanSessions() },
-                    )
-                    DropdownMenuItem(text = { Text("Copy latest response") }, onClick = { menuOpen = false; onCopyLatest() })
-                    DropdownMenuItem(text = { Text("Clear output") }, onClick = { menuOpen = false; onClear() })
-                }
+            IconButton(onClick = onNewChat) {
+                Icon(Icons.Filled.Add, contentDescription = "New chat")
+            }
+            IconButton(onClick = onOpenSettings) {
+                Icon(Icons.Filled.Settings, contentDescription = "Settings")
             }
         },
         colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AppDrawerContent(
+    connected: Boolean,
+    connecting: Boolean,
+    sessionInfo: String,
+    scanningSessions: Boolean,
+    onConnect: () -> Unit,
+    onDisconnect: () -> Unit,
+    onScanSessions: () -> Unit,
+    onCopyLatest: () -> Unit,
+    onClear: () -> Unit,
+    onCloseDrawer: () -> Unit,
+) {
+    ModalDrawerSheet(drawerContainerColor = MaterialTheme.colorScheme.surface) {
+        Column(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 20.dp).fillMaxHeight(),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.padding(bottom = 10.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(13.dp))
+                        .background(Brush.linearGradient(listOf(PiGreenDark, PiTeal))),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Image(
+                        painter = painterResource(id = R.drawable.ic_pi_remote),
+                        contentDescription = null,
+                        modifier = Modifier.size(34.dp),
+                    )
+                }
+                Column {
+                    Text("π Remote", style = MaterialTheme.typography.titleMedium)
+                    Text(sessionInfo, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+            Spacer(Modifier.height(8.dp))
+            DrawerItem(
+                icon = { Icon(if (connected) Icons.Filled.Stop else Icons.Filled.ArrowUpward, contentDescription = null, modifier = Modifier.size(22.dp)) },
+                label = if (connected) "Disconnect" else if (connecting) "Connecting…" else "Connect",
+                enabled = !connecting,
+                onClick = { onCloseDrawer(); if (connected) onDisconnect() else onConnect() },
+            )
+            DrawerItem(
+                icon = { Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(22.dp)) },
+                label = if (scanningSessions) "Scanning…" else "Browse sessions",
+                enabled = !scanningSessions,
+                onClick = { onCloseDrawer(); onScanSessions() },
+            )
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f), modifier = Modifier.padding(vertical = 6.dp))
+            DrawerItem(
+                icon = { Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(22.dp)) },
+                label = "Copy latest response",
+                onClick = { onCloseDrawer(); onCopyLatest() },
+            )
+            DrawerItem(
+                icon = { Icon(Icons.Filled.Stop, contentDescription = null, modifier = Modifier.size(22.dp)) },
+                label = "Clear conversation",
+                onClick = { onCloseDrawer(); onClear() },
+            )
+        }
+    }
+}
+
+@Composable
+private fun DrawerItem(
+    icon: @Composable () -> Unit,
+    label: String,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        icon()
+        Text(label, style = MaterialTheme.typography.bodyLarge, color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SettingsSheet(
+    host: String,
+    onHostChange: (String) -> Unit,
+    port: String,
+    onPortChange: (String) -> Unit,
+    token: String,
+    onTokenChange: (String) -> Unit,
+    showToken: Boolean,
+    onToggleShowToken: () -> Unit,
+    autoSendShared: Boolean,
+    onAutoSendSharedChange: (Boolean) -> Unit,
+    keepAwake: Boolean,
+    onKeepAwakeChange: (Boolean) -> Unit,
+    connected: Boolean,
+    connecting: Boolean,
+    status: String,
+    onSave: () -> Unit,
+    onScanQr: () -> Unit,
+    onConnect: () -> Unit,
+    onDisconnect: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("Connection", style = MaterialTheme.typography.titleLarge)
+            Text(status, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                OutlinedTextField(host, onHostChange, label = { Text("Host") }, modifier = Modifier.weight(1f), singleLine = true, shape = RoundedCornerShape(14.dp))
+                OutlinedTextField(port, onPortChange, label = { Text("Port") }, modifier = Modifier.width(110.dp), singleLine = true, shape = RoundedCornerShape(14.dp))
+            }
+            OutlinedTextField(
+                value = token,
+                onValueChange = onTokenChange,
+                label = { Text("Token") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                shape = RoundedCornerShape(14.dp),
+                visualTransformation = if (showToken) VisualTransformation.None else PasswordVisualTransformation(),
+                trailingIcon = {
+                    TextButton(onClick = onToggleShowToken) { Text(if (showToken) "Hide" else "Show") }
+                },
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onSave, shape = RoundedCornerShape(999.dp)) { Text("Save") }
+                OutlinedButton(onClick = onScanQr, shape = RoundedCornerShape(999.dp)) { Text("Scan QR") }
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f))
+            SettingsSwitchRow(
+                title = "Auto-send shared content",
+                subtitle = "When opened from Android Share",
+                checked = autoSendShared,
+                onCheckedChange = onAutoSendSharedChange,
+            )
+            SettingsSwitchRow(
+                title = "Keep screen awake",
+                subtitle = "While connected",
+                checked = keepAwake,
+                onCheckedChange = onKeepAwakeChange,
+            )
+            Button(
+                onClick = { if (connected) onDisconnect() else onConnect() },
+                enabled = !connecting,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = RoundedCornerShape(999.dp),
+                colors = if (connected) ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError) else ButtonDefaults.buttonColors(),
+            ) { Text(if (connected) "Disconnect" else if (connecting) "Connecting…" else "Connect to Pi") }
+        }
+    }
+}
 @Composable
 private fun SettingsSwitchRow(
     title: String,
@@ -950,31 +1133,59 @@ private fun SessionPickerDialog(
     )
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun EmptyState(text: String, modifier: Modifier = Modifier) {
+private fun WelcomeScreen(
+    working: Boolean,
+    modifier: Modifier = Modifier,
+    onSuggest: (String) -> Unit,
+) {
+    val suggestions = listOf(
+        "Explain this project structure",
+        "Write a bash backup script",
+        "Summarize recent changes",
+        "Help me fix a bug",
+    )
     Column(
-        modifier = modifier,
+        modifier = modifier.padding(horizontal = 28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Box(
             modifier = Modifier
-                .size(82.dp)
-                .clip(RoundedCornerShape(24.dp))
-                .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f)),
+                .size(88.dp)
+                .clip(RoundedCornerShape(26.dp))
+                .background(Brush.linearGradient(listOf(PiGreenDark, PiTeal))),
             contentAlignment = Alignment.Center,
         ) {
             Image(
                 painter = painterResource(id = R.drawable.ic_pi_remote),
                 contentDescription = null,
-                modifier = Modifier.size(68.dp),
+                modifier = Modifier.size(70.dp),
             )
         }
         Text(
-            text,
-            color = MaterialTheme.colorScheme.outline,
-            style = MaterialTheme.typography.bodyLarge,
+            if (working) "Pi is working…" else "How can I help you today?",
+            style = MaterialTheme.typography.headlineSmall,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
         )
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            suggestions.forEach { suggestion ->
+                Surface(
+                    onClick = { onSuggest(suggestion) },
+                    shape = RoundedCornerShape(999.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)),
+                ) {
+                    Text(
+                        suggestion,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -1029,7 +1240,12 @@ private fun ComposerPanel(
     onAbort: () -> Unit,
 ) {
     val haptics = LocalHapticFeedback.current
-    val modes = listOf("prompt" to "Ask", "steer" to "Steer", "follow_up" to "Follow")
+    val context = LocalContext.current
+    val modes = listOf(
+        Triple("prompt", "Ask — send a new prompt", "ask"),
+        Triple("steer", "Steer — redirect the current run", "steer"),
+        Triple("follow_up", "Follow up — continue the topic", "follow"),
+    )
     var selectedMode by remember { mutableStateOf("prompt") }
     var confirmAbort by remember { mutableStateOf(false) }
     val canSend = connected && (input.isNotBlank() || attachments.isNotEmpty())
@@ -1047,83 +1263,94 @@ private fun ComposerPanel(
             sentPulse = false
         }
     }
-    ElevatedCard(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.62f)),
-        shape = RoundedCornerShape(22.dp),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
-    ) {
-        Column(
-            modifier = Modifier.padding(PaddingValues(start = 10.dp, end = 10.dp, top = 8.dp, bottom = 16.dp)),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            if (attachments.isNotEmpty()) {
-                AttachmentChips(attachments = attachments, onRemove = onRemoveAttachment)
-            }
 
+    Column(modifier = Modifier.fillMaxWidth()) {
+        if (attachments.isNotEmpty()) {
+            AttachmentChips(attachments = attachments, onRemove = onRemoveAttachment)
+            Spacer(Modifier.height(6.dp))
+        }
+
+        // Mode icon chips row (compact icons with long-press tooltips)
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 4.dp),
+        ) {
+            IconChipButton(
+                icon = { Icon(Icons.Outlined.AttachFile, contentDescription = "Attach file", modifier = Modifier.size(20.dp)) },
+                tooltip = "Attach file",
+                onClick = { haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove); onAttach() },
+                enabled = attachments.size < 4,
+                context = context,
+            )
+            modes.forEach { (value, tooltip, _) ->
+                IconChipButton(
+                    icon = {
+                        when (value) {
+                            "prompt" -> Icon(Icons.AutoMirrored.Outlined.Help, contentDescription = null, modifier = Modifier.size(20.dp))
+                            "steer" -> Icon(Icons.Outlined.Explore, contentDescription = null, modifier = Modifier.size(20.dp))
+                            else -> Icon(Icons.Outlined.Visibility, contentDescription = null, modifier = Modifier.size(20.dp))
+                        }
+                    },
+                    tooltip = tooltip.substringBefore(" —"),
+                    selected = selectedMode == value,
+                    onClick = { selectedMode = value; haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove) },
+                    context = context,
+                )
+            }
+            Spacer(Modifier.weight(1f))
+            IconChipButton(
+                icon = { Icon(Icons.Filled.Stop, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                tooltip = "Abort run",
+                danger = true,
+                enabled = connected && working,
+                onClick = { confirmAbort = true },
+                context = context,
+            )
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        // Pill input + circular send button
+        Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.fillMaxWidth()) {
             OutlinedTextField(
                 value = input,
                 onValueChange = onInputChange,
                 placeholder = { Text(if (connected) "Message Pi…" else "Connect to send…") },
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = if (keyboardVisible) 60.dp else 64.dp),
+                    .weight(1f)
+                    .heightIn(min = 52.dp),
                 minLines = 1,
-                maxLines = if (keyboardVisible) 3 else 4,
-                shape = RoundedCornerShape(26.dp),
+                maxLines = if (keyboardVisible) 4 else 5,
+                shape = RoundedCornerShape(28.dp),
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
-                    focusedContainerColor = MaterialTheme.colorScheme.surface,
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                    focusedBorderColor = Color.Transparent,
+                    unfocusedBorderColor = Color.Transparent,
+                    focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
                     cursorColor = MaterialTheme.colorScheme.primary,
                 ),
-                trailingIcon = {
-                    Button(
-                        onClick = { sendWithPulse() },
-                        enabled = sendEnabled,
-                        modifier = Modifier.padding(end = 6.dp),
-                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp),
-                        shape = RoundedCornerShape(50),
-                    ) { Text(if (sentPulse) "Sent ✓" else "Send", maxLines = 1, softWrap = false) }
-                },
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = KeyboardActions(onSend = { if (sendEnabled) sendWithPulse() }),
             )
-
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
+            Spacer(Modifier.width(8.dp))
+            FilledIconButton(
+                onClick = { sendWithPulse() },
+                enabled = sendEnabled,
+                modifier = Modifier.size(48.dp),
+                shape = RoundedCornerShape(999.dp),
+                colors = IconButtonDefaults.filledIconButtonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
             ) {
-                    OutlinedButton(
-                        onClick = { haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove); onAttach() },
-                        enabled = attachments.size < 4,
-                        modifier = Modifier.height(38.dp),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
-                    ) { Text("＋ File", maxLines = 1, softWrap = false, style = MaterialTheme.typography.labelMedium) }
-                    modes.forEach { (value, label) ->
-                        FilterChip(
-                            selected = selectedMode == value,
-                            onClick = { selectedMode = value; haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove) },
-                            label = { Text(label, maxLines = 1, softWrap = false, style = MaterialTheme.typography.labelMedium) },
-                            modifier = Modifier.height(38.dp),
-                        )
-                    }
-                    Button(
-                        onClick = { confirmAbort = true },
-                        enabled = connected && working,
-                        modifier = Modifier.height(38.dp),
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 2.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.error,
-                            contentColor = MaterialTheme.colorScheme.onError,
-                        ),
-                    ) { Text("Abort", maxLines = 1, softWrap = false, style = MaterialTheme.typography.labelMedium) }
-                }
+                Icon(Icons.Filled.ArrowUpward, contentDescription = if (sentPulse) "Sent" else "Send")
+            }
         }
     }
+
     if (confirmAbort) {
         AlertDialog(
             onDismissRequest = { confirmAbort = false },
@@ -1141,6 +1368,45 @@ private fun ComposerPanel(
                 ) { Text("Abort") }
             },
         )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
+private fun IconChipButton(
+    icon: @Composable () -> Unit,
+    tooltip: String,
+    selected: Boolean = false,
+    danger: Boolean = false,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+    context: android.content.Context,
+) {
+    val bg = when {
+        danger && enabled -> MaterialTheme.colorScheme.errorContainer
+        selected -> MaterialTheme.colorScheme.primaryContainer
+        else -> Color.Transparent
+    }
+    val fg = when {
+        danger && enabled -> MaterialTheme.colorScheme.onErrorContainer
+        selected -> MaterialTheme.colorScheme.onPrimaryContainer
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Box(
+        modifier = Modifier
+            .size(38.dp)
+            .clip(RoundedCornerShape(999.dp))
+            .background(bg)
+            .combinedClickable(
+                onClick = { if (enabled) onClick() },
+                onLongClick = {
+                    Toast.makeText(context, tooltip, Toast.LENGTH_SHORT).show()
+                },
+                enabled = enabled,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        CompositionLocalProvider(LocalContentColor provides fg) { icon() }
     }
 }
 
@@ -1165,113 +1431,52 @@ private fun AttachmentChips(
     }
 }
 
-@Composable
-private fun StatusPanel(status: String, connected: Boolean, working: Boolean, sessionInfo: String) {
-    val gradient = when {
-        connected && working -> listOf(PiGreenDark, Color(0xFF0F766E))
-        connected -> listOf(Color(0xFF064E3B), MaterialTheme.colorScheme.primaryContainer)
-        else -> listOf(MaterialTheme.colorScheme.errorContainer, Color(0xFF991B1B))
-    }
-    val content = if (connected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onErrorContainer
-    val title = when {
-        working -> "Working…"
-        connected -> "Connected"
-        else -> status
-    }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(Brush.linearGradient(gradient))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(10.dp)
-                .clip(RoundedCornerShape(999.dp))
-                .background(if (connected) PiGreen else MaterialTheme.colorScheme.error),
-        )
-        Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(title, color = content, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                val nickname = sessionNickname(sessionInfo)
-                if (nickname.isNotBlank()) {
-                    Surface(
-                        color = Color.White.copy(alpha = 0.14f),
-                        shape = RoundedCornerShape(999.dp),
-                    ) {
-                        Text(
-                            nickname,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                            color = content,
-                            style = MaterialTheme.typography.labelSmall,
-                            maxLines = 1,
-                            softWrap = false,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-            }
-            Text(
-                sessionInfo,
-                color = content.copy(alpha = 0.85f),
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        if (working) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(18.dp),
-                strokeWidth = 2.dp,
-                color = content,
-            )
-        }
-    }
-}
-
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun ChatCard(item: ChatItem, onToggleTool: () -> Unit, onCopy: () -> Unit) {
     val colors = when (item.kind) {
         ChatKind.User -> CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
-        ChatKind.Assistant -> CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.92f))
+        ChatKind.Assistant -> CardDefaults.cardColors(containerColor = Color.Transparent)
         ChatKind.Tool -> CardDefaults.cardColors(containerColor = toolContainerColor(item))
         ChatKind.System -> CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.82f))
         ChatKind.Error -> CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
     }
-    val align = if (item.kind == ChatKind.User) Alignment.CenterEnd else Alignment.CenterStart
-    val shape = RoundedCornerShape(
-        topStart = if (item.kind == ChatKind.User) 18.dp else 6.dp,
-        topEnd = if (item.kind == ChatKind.User) 6.dp else 18.dp,
-        bottomStart = 18.dp,
-        bottomEnd = 18.dp,
-    )
+    val isUser = item.kind == ChatKind.User
+    val align = if (isUser) Alignment.CenterEnd else Alignment.CenterStart
+    // ChatGPT-style bubbles: user bubble 18dp right-aligned; Pi messages full-width flat.
+    val shape = if (isUser) {
+        RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = 18.dp, bottomEnd = 6.dp)
+    } else {
+        RoundedCornerShape(14.dp)
+    }
     Box(modifier = Modifier.fillMaxWidth(), contentAlignment = align) {
         ElevatedCard(
             modifier = Modifier
-                .fillMaxWidth(if (item.kind == ChatKind.User) 0.92f else 1f)
+                .then(if (isUser) Modifier.fillMaxWidth(0.85f) else Modifier.fillMaxWidth())
                 .combinedClickable(
                     onClick = { if (item.kind == ChatKind.Tool) onToggleTool() },
                     onLongClick = onCopy,
                 ),
             colors = colors,
             shape = shape,
-            elevation = CardDefaults.elevatedCardElevation(defaultElevation = if (item.kind == ChatKind.User) 3.dp else 1.dp),
+            elevation = CardDefaults.elevatedCardElevation(defaultElevation = if (isUser) 3.dp else 0.dp),
         ) {
-            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                Text(
-                    toolTitle(item),
-                    style = MaterialTheme.typography.labelLarge,
-                    color = when (item.kind) {
-                        ChatKind.User -> MaterialTheme.colorScheme.onSecondaryContainer
-                        ChatKind.Tool -> MaterialTheme.colorScheme.onTertiaryContainer
-                        ChatKind.Error -> MaterialTheme.colorScheme.onErrorContainer
-                        else -> MaterialTheme.colorScheme.primary
-                    },
-                )
+            Column(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = if (item.kind == ChatKind.Assistant) 6.dp else 12.dp),
+                verticalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                if (item.kind != ChatKind.Assistant) {
+                    Text(
+                        toolTitle(item),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = when (item.kind) {
+                            ChatKind.User -> MaterialTheme.colorScheme.onSecondaryContainer
+                            ChatKind.Tool -> MaterialTheme.colorScheme.onTertiaryContainer
+                            ChatKind.Error -> MaterialTheme.colorScheme.onErrorContainer
+                            else -> MaterialTheme.colorScheme.primary
+                        },
+                    )
+                }
                 if (item.kind == ChatKind.Assistant) {
                     MarkdownText(text = item.text.ifBlank { "…" })
                 } else {
@@ -1299,20 +1504,73 @@ private fun toolContainerColor(item: ChatItem): Color {
 
 @Composable
 private fun MarkdownText(text: String) {
+    val lines = text.lines()
+    var i = 0
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        text.lines().forEach { line ->
-            val trimmed = line.trimStart()
+        while (i < lines.size) {
+            val trimmed = lines[i].trimStart()
             when {
+                // Fenced code blocks ```
+                trimmed.startsWith("```") -> {
+                    val codeLines = mutableListOf<String>()
+                    i++
+                    while (i < lines.size && !lines[i].trimStart().startsWith("```")) {
+                        codeLines.add(lines[i])
+                        i++
+                    }
+                    i++ // skip closing fence
+                    MarkdownCodeBlock(codeLines.joinToString("\n"))
+                }
                 trimmed.startsWith("# ") -> MarkdownHeading(trimmed.substring(2), level = 1)
                 trimmed.startsWith("## ") -> MarkdownHeading(trimmed.substring(3), level = 2)
-                trimmed.startsWith("### ") -> MarkdownHeading(trimmed.substring(4), level = 3)
+                trimmed.startsWith("### ") || trimmed.startsWith("#### ") ->
+                    MarkdownHeading(trimmed.trimStart('#').trim(), level = 3)
+                // Bullet lists
+                trimmed.startsWith("- ") || trimmed.startsWith("* ") -> {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            "•",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                        Text(
+                            parseInlineMarkdown(trimmed.substring(2), MaterialTheme.colorScheme.surfaceVariant),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                }
+                // Numbered lists
+                Regex("^\\d+[.)] ").containsMatchIn(trimmed) -> {
+                    Text(
+                        parseInlineMarkdown(trimmed, MaterialTheme.colorScheme.surfaceVariant),
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(start = 14.dp),
+                    )
+                }
                 trimmed.isBlank() -> Spacer(Modifier.height(6.dp))
                 else -> Text(
                     parseInlineMarkdown(trimmed, MaterialTheme.colorScheme.surfaceVariant),
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
+            i++
         }
+    }
+}
+
+@Composable
+private fun MarkdownCodeBlock(code: String) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f),
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text(
+            code,
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier.padding(10.dp),
+        )
     }
 }
 
