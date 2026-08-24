@@ -14,6 +14,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -30,14 +31,24 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -82,6 +93,10 @@ import okhttp3.*
 import okio.ByteString
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
@@ -97,8 +112,7 @@ class MainActivity : ComponentActivity() {
         pendingUri = intent?.data?.toString()
         pendingSharedUris = extractSharedUris(intent)
         pendingSharedText = extractSharedText(intent)
-        window.statusBarColor = android.graphics.Color.parseColor("#170609")
-        window.navigationBarColor = android.graphics.Color.parseColor("#170609")
+        enableEdgeToEdge()
         setContent { PiRemoteApp(connectionUri = pendingUri, sharedUris = pendingSharedUris, sharedText = pendingSharedText) }
     }
 
@@ -181,13 +195,17 @@ data class ChatItem(
     val title: String,
     val text: String,
     val expanded: Boolean = false,
+    val ts: Long = System.currentTimeMillis(),
+    val model: String? = null,
+    val startedAt: Long = 0L,
+    val endedAt: Long = 0L,
 )
 
-data class SessionCandidate(
+internal data class RecentSession(
     val host: String,
     val port: Int,
     val label: String,
-    val isIdle: Boolean,
+    val lastOpened: Long,
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -210,9 +228,6 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
     var autoSendShared by remember { mutableStateOf(prefs.getBoolean("autoSendShared", false)) }
     var keepAwake by remember { mutableStateOf(prefs.getBoolean("keepAwake", false)) }
     var pendingAutoSendShared by remember { mutableStateOf(false) }
-    var scanningSessions by remember { mutableStateOf(false) }
-    var showSessionPicker by remember { mutableStateOf(false) }
-    val sessionCandidates = remember { mutableStateListOf<SessionCandidate>() }
     var working by remember { mutableStateOf(false) }
     var suppressNextCloseNotice by remember { mutableStateOf(false) }
     var reconnectAttempts by remember { mutableIntStateOf(0) }
@@ -222,7 +237,26 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
     var activeAssistantId by remember { mutableStateOf<Long?>(null) }
     var scrollVersion by remember { mutableIntStateOf(0) }
     var autoConnectRequest by remember { mutableIntStateOf(0) }
-    val messages = remember { mutableStateListOf<ChatItem>() }
+    val messages = remember {
+        mutableStateListOf<ChatItem>().apply {
+            val historyFile = File(context.filesDir, "chat_history.json")
+            if (historyFile.isFile) {
+                runCatching { deserializeMessages(historyFile.readText()) }.getOrNull()?.let { addAll(it) }
+            }
+        }
+    }
+    val recentSessions = remember {
+        mutableStateListOf<RecentSession>().apply {
+            val raw = prefs.getString("recentSessions", null) ?: return@apply
+            runCatching {
+                val arr = JSONArray(raw)
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    add(RecentSession(o.optString("host"), o.optInt("port"), o.optString("label"), o.optLong("lastOpened")))
+                }
+            }
+        }
+    }
     val activeToolMessages = remember { mutableStateMapOf<String, Long>() }
     val pendingUserEchoes = remember { mutableStateListOf<String>() }
     val listState = rememberLazyListState()
@@ -255,6 +289,43 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
     var webSocket by remember { mutableStateOf<WebSocket?>(null) }
 
     fun nextId() = System.nanoTime()
+
+    fun persistMessages() {
+        runCatching {
+            File(context.filesDir, "chat_history.json").writeText(serializeMessages(messages))
+        }
+    }
+
+    fun persistRecentSessions() {
+        runCatching {
+            val arr = JSONArray()
+            recentSessions.forEach { s ->
+                arr.put(JSONObject().put("host", s.host).put("port", s.port).put("label", s.label).put("lastOpened", s.lastOpened))
+            }
+            prefs.edit().putString("recentSessions", arr.toString()).apply()
+        }
+    }
+
+    fun recordRecentSession(host: String, port: Int, label: String) {
+        if (host.isBlank() || port !in 1..65535) return
+        val now = System.currentTimeMillis()
+        val existing = recentSessions.firstOrNull { it.host == host && it.port == port }
+        recentSessions.removeAll { it.host == host && it.port == port }
+        recentSessions.add(0, RecentSession(host, port, label.ifBlank { existing?.label.orEmpty() }, now))
+        while (recentSessions.size > 20) recentSessions.removeAt(recentSessions.lastIndex)
+        persistRecentSessions()
+    }
+
+    fun refreshCurrentRecentLabel(info: String) {
+        val port = port.toIntOrNull() ?: return
+        val name = sessionName(info, connected = true)
+        if (name.isBlank()) return
+        val idx = recentSessions.indexOfFirst { it.host == host.trim() && it.port == port }
+        if (idx >= 0 && recentSessions[idx].label != name) {
+            recentSessions[idx] = recentSessions[idx].copy(label = name)
+            persistRecentSessions()
+        }
+    }
 
     fun copyText(label: String, value: String) {
         if (value.isBlank()) return
@@ -330,6 +401,19 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
         }
     }
 
+    /** Seals the open assistant bubble with its real duration and closes it. */
+    fun finalizeActiveAssistant() {
+        val id = activeAssistantId ?: return
+        val index = messages.indexOfFirst { it.id == id }
+        if (index >= 0) {
+            val old = messages[index]
+            if (old.endedAt == 0L) {
+                messages[index] = old.copy(endedAt = System.currentTimeMillis())
+            }
+        }
+        activeAssistantId = null
+    }
+
     fun appendAssistantDelta(delta: String) {
         if (delta.isEmpty()) return
         val id = activeAssistantId
@@ -338,9 +422,23 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
             val old = messages[index]
             messages[index] = old.copy(text = old.text + delta)
         } else {
+            // Finalize any stale bubble so the new bubble lands AFTER previous events,
+            // preserving stream order: Message A -> Tool A -> Message B ...
+            finalizeActiveAssistant()
             val newId = nextId()
             activeAssistantId = newId
-            messages.add(ChatItem(newId, ChatKind.Assistant, "Assistant", delta))
+            val now = System.currentTimeMillis()
+            messages.add(
+                ChatItem(
+                    id = newId,
+                    kind = ChatKind.Assistant,
+                    title = "Assistant",
+                    text = delta,
+                    ts = now,
+                    startedAt = now,
+                    model = modelLabel(sessionInfo).takeIf { connected },
+                )
+            )
         }
         scrollVersion++
     }
@@ -360,11 +458,23 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
             val updatedText = mergeToolText(old.text, text, done)
             messages[index] = old.copy(title = title, text = updatedText)
         } else {
+            // A new tool card must close the open assistant bubble, otherwise
+            // subsequent assistant deltas would keep appending ABOVE this card
+            // and break stream ordering (A → CodeA → B → CodeB).
+            finalizeActiveAssistant()
             val newId = nextId()
             activeToolMessages[toolCallId] = newId
-            messages.add(ChatItem(newId, ChatKind.Tool, title, text))
+            val now = System.currentTimeMillis()
+            messages.add(ChatItem(newId, ChatKind.Tool, title, text, ts = now, startedAt = now))
         }
-        if (done) activeToolMessages.remove(toolCallId)
+        if (done) {
+            val doneId = activeToolMessages[toolCallId]
+            val doneIdx = doneId?.let { id -> messages.indexOfFirst { it.id == id } } ?: -1
+            if (doneIdx >= 0 && messages[doneIdx].endedAt == 0L) {
+                messages[doneIdx] = messages[doneIdx].copy(endedAt = System.currentTimeMillis())
+            }
+            activeToolMessages.remove(toolCallId)
+        }
         scrollVersion++
     }
 
@@ -450,20 +560,33 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
         }
     }
 
-    fun connect(clearMessages: Boolean = true) {
+    fun connect(clearMessages: Boolean = false) {
         if (connecting) return
         if (webSocket != null) suppressNextCloseNotice = true
         webSocket?.close(1000, "Reconnect")
+        val cleanHost = host.trim()
+        val cleanPort = port.trim().ifBlank { "37891" }
+        val sessionKey = "$cleanHost:$cleanPort"
         if (clearMessages) {
             messages.clear()
             activeToolMessages.clear()
             activeAssistantId = null
             scrollVersion++
+        } else {
+            // Switching to a DIFFERENT session starts a fresh transcript.
+            // Reconnecting to the SAME session keeps the locally persisted history.
+            val previousKey = prefs.getString("lastSessionKey", null)
+            if (previousKey != null && previousKey != sessionKey && messages.isNotEmpty()) {
+                persistMessages()
+                messages.clear()
+                activeToolMessages.clear()
+                activeAssistantId = null
+                scrollVersion++
+            }
+            prefs.edit().putString("lastSessionKey", sessionKey).apply()
         }
         saveConnectionSettings()
         prefs.edit().putBoolean("autoReconnect", true).apply()
-        val cleanHost = host.trim()
-        val cleanPort = port.trim().ifBlank { "37891" }
         val url = Uri.Builder()
             .scheme("ws")
             .encodedAuthority("$cleanHost:${cleanPort.toIntOrNull() ?: 37891}")
@@ -484,6 +607,7 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                     supportsBinaryFileAttachments = false
                     status = "Connected"
                     reconnectAttempts = 0
+                    recordRecentSession(cleanHost, cleanPort.toIntOrNull() ?: 37891, "")
                 }
             }
 
@@ -494,10 +618,13 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                         addMessage = ::addMessage,
                         appendAssistantDelta = ::appendAssistantDelta,
                         upsertToolMessage = ::upsertToolMessage,
-                        setSessionInfo = { sessionInfo = it },
+                        setSessionInfo = { info ->
+                            sessionInfo = info
+                            refreshCurrentRecentLabel(info)
+                        },
                         setWorking = { working = it },
                         setSupportsBinaryFileAttachments = { supportsBinaryFileAttachments = it },
-                        clearActiveAssistant = { activeAssistantId = null },
+                        clearActiveAssistant = { finalizeActiveAssistant() },
                         suppressUserEcho = { echoedText ->
                             val index = pendingUserEchoes.indexOfFirst { pendingText -> isSameUserEcho(pendingText, echoedText) }
                             if (index >= 0) {
@@ -573,49 +700,6 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
     fun shouldAutoReconnect(): Boolean =
         prefs.getBoolean("autoReconnect", false) && host.isNotBlank() && port.isNotBlank() && token.isNotBlank()
 
-    fun scanSessions() {
-        val baseHost = host.trim().ifBlank { return }
-        val currentPort = port.toIntOrNull() ?: 37891
-        val ports = ((currentPort - 2)..(currentPort + 8)).filter { it in 1..65535 }.distinct()
-        sessionCandidates.clear()
-        scanningSessions = true
-        var pending = ports.size
-        fun doneOne() = mainHandler.post {
-            pending--
-            if (pending <= 0) {
-                scanningSessions = false
-                showSessionPicker = true
-            }
-        }
-        ports.forEach { scanPort ->
-            var finished = false
-            fun donePort() {
-                if (finished) return
-                finished = true
-                doneOne()
-            }
-            val url = Uri.Builder().scheme("ws").encodedAuthority("$baseHost:$scanPort").appendQueryParameter("token", token.trim()).build().toString()
-            val ws = client.newWebSocket(Request.Builder().url(url).build(), object : WebSocketListener() {
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    if (finished) return
-                    val obj = runCatching { JSONObject(text) }.getOrNull()
-                    if (obj?.optString("type") == "hello") {
-                        val state = obj.optJSONObject("state")
-                        val idle = state?.optBoolean("isIdle", true) ?: true
-                        val model = state?.optJSONObject("model")?.optString("id").orEmpty()
-                        val cwd = state?.optString("cwd").orEmpty().substringAfterLast('\\').ifBlank { state?.optString("cwd").orEmpty() }
-                        mainHandler.post { sessionCandidates.add(SessionCandidate(baseHost, scanPort, "${if (idle) "Idle" else "Working"} • $model • $cwd", idle)) }
-                        webSocket.close(1000, "scan complete")
-                        donePort()
-                    }
-                }
-                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) { donePort() }
-                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) { donePort() }
-            })
-            mainHandler.postDelayed({ if (!finished) { ws.cancel(); donePort() } }, 1800)
-        }
-    }
-
     LaunchedEffect(connected, keepAwake) {
         if (connected && keepAwake) context.findActivity()?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else context.findActivity()?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -639,9 +723,52 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
         if (autoConnectRequest > 0 && !connected && !connecting) connect()
     }
 
-    LaunchedEffect(scrollVersion) {
+    // ---- Scroll architecture (chat-grade) -------------------------------------
+    // stickToBottom is TRUE only while the user is effectively at the latest
+    // message. Opening the keyboard NEVER scrolls; new content only snaps when
+    // stuck. Explicit scroll-to-bottom happens solely via the FAB or sending.
+    var stickToBottom by remember { mutableStateOf(true) }
+
+    val isAtBottom by remember {
+        derivedStateOf {
+            val li = listState.layoutInfo
+            val last = li.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf true
+            last.index >= li.totalItemsCount - 1 &&
+                (li.viewportEndOffset - (last.offset + last.size)) > -180
+        }
+    }
+
+    // Re-evaluate stickiness whenever the user finishes a scroll gesture.
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            if (!scrolling) stickToBottom = isAtBottom
+        }
+    }
+
+    // New content / viewport changes: pin ONLY when already stuck. Instant snap
+    // (no animation) keeps the last messages glued under the keyboard edge.
+    LaunchedEffect(scrollVersion, keyboardVisible) {
+        if (messages.isNotEmpty() && stickToBottom) {
+            withFrameNanos { }
+            listState.scrollToItem(messages.lastIndex)
+        }
+    }
+
+    // First composition (restored session): jump straight to the latest message
+    // without animation and without waiting for network.
+    LaunchedEffect(Unit) {
         if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.lastIndex)
+            listState.scrollToItem(messages.lastIndex)
+        }
+    }
+
+    // Persist transcript (debounced) on any content change, incl. streamed deltas.
+    LaunchedEffect(Unit) {
+        snapshotFlow {
+            messages.size to (messages.lastOrNull()?.text?.length ?: 0)
+        }.collect {
+            delay(600)
+            persistMessages()
         }
     }
 
@@ -657,15 +784,22 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                     connected = connected,
                     connecting = connecting,
                     sessionInfo = sessionInfo,
+                    sessions = recentSessions.toList(),
+                    currentSessionKey = "$host.trim():${port.toIntOrNull() ?: -1}",
                     onConnect = { connect() },
                     onDisconnect = ::disconnect,
-                    onScanSessions = ::scanSessions,
-                    scanningSessions = scanningSessions,
+                    onSelectSession = { s ->
+                        host = s.host
+                        port = s.port.toString()
+                        saveConnectionSettings()
+                        connect()
+                    },
                     onCopyLatest = { copyText("Assistant", latestAssistantText()) },
                     onClear = {
                         messages.clear()
                         activeAssistantId = null
                         activeToolMessages.clear()
+                        persistMessages()
                     },
                     onCloseDrawer = { scope.launch { drawerState.close() } },
                 )
@@ -733,26 +867,49 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                             .fillMaxHeight()
                             .width(6.dp),
                     )
+
+                    // Scroll-to-latest FAB (ChatGPT style): visible only when the
+                    // user has scrolled away from the bottom.
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = messages.isNotEmpty() && !isAtBottom,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 12.dp),
+                        enter = fadeIn() + slideInVertically { it / 2 },
+                        exit = fadeOut() + slideOutVertically { it / 2 },
+                    ) {
+                        SmallFloatingActionButton(
+                            onClick = {
+                                scope.launch {
+                                    stickToBottom = true
+                                    listState.animateScrollToItem(messages.lastIndex)
+                                }
+                            },
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        ) {
+                            Icon(Icons.Filled.KeyboardArrowDown, contentDescription = "Scroll to latest")
+                        }
+                    }
                 }
 
-                if (scanningSessions) {
-                    ScanningSessionsDialog()
-                }
-
-                if (showSessionPicker) {
-                    SessionPickerDialog(
-                        candidates = sessionCandidates.sortedWith(compareBy<SessionCandidate> { it.isIdle }.thenBy { it.port }),
-                        currentHost = host.trim(),
-                        currentPort = port.toIntOrNull() ?: -1,
-                        onDismiss = { showSessionPicker = false },
-                        onPick = { candidate ->
-                            host = candidate.host
-                            port = candidate.port.toString()
-                            saveConnectionSettings()
-                            showSessionPicker = false
-                            connect()
-                        },
-                    )
+                // Real working state derived from actual Pi events only.
+                if (connected && working) {
+                    val runningToolTitle = messages.lastOrNull { m -> activeToolMessages.values.contains(m.id) }?.title.orEmpty()
+                    val subStatus = if (runningToolTitle.contains("running", ignoreCase = true)) "ينفذ أمرًا…" else "يفكر الآن…"
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(start = 10.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(PiTeal),
+                        )
+                        Text(subStatus, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    }
                 }
 
                 ComposerPanel(
@@ -765,6 +922,7 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                     onSend = { type ->
                         sendJson(type, input)
                         input = ""
+                        stickToBottom = true
                     },
                     onAttach = { picker.launch("*/*") },
                     onClearAttachments = { attachments.clear() },
@@ -940,23 +1098,28 @@ private fun AppDrawerContent(
     connected: Boolean,
     connecting: Boolean,
     sessionInfo: String,
-    scanningSessions: Boolean,
+    sessions: List<RecentSession>,
+    currentSessionKey: String,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
-    onScanSessions: () -> Unit,
+    onSelectSession: (RecentSession) -> Unit,
     onCopyLatest: () -> Unit,
     onClear: () -> Unit,
     onCloseDrawer: () -> Unit,
 ) {
+    var showAllSessions by remember { mutableStateOf(false) }
     ModalDrawerSheet(drawerContainerColor = MaterialTheme.colorScheme.surface) {
         Column(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 20.dp).fillMaxHeight(),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier
+                .padding(horizontal = 14.dp, vertical = 20.dp)
+                .fillMaxHeight()
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            // Header with explicit close button (works in RTL too)
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.padding(bottom = 10.dp),
             ) {
                 Box(
                     modifier = Modifier
@@ -979,53 +1142,127 @@ private fun AppDrawerContent(
                     Icon(Icons.Filled.Close, contentDescription = "Close drawer")
                 }
             }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
-            Spacer(Modifier.height(8.dp))
-            DrawerItem(
-                icon = { Icon(if (connected) Icons.Filled.Stop else Icons.Filled.ArrowUpward, contentDescription = null, modifier = Modifier.size(22.dp)) },
-                label = if (connected) "Disconnect" else if (connecting) "Connecting…" else "Connect",
-                enabled = !connecting,
-                onClick = { onCloseDrawer(); if (connected) onDisconnect() else onConnect() },
-            )
-            DrawerItem(
-                icon = { Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(22.dp)) },
-                label = if (scanningSessions) "Scanning…" else "Browse sessions",
-                enabled = !scanningSessions,
-                onClick = { onCloseDrawer(); onScanSessions() },
-            )
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f), modifier = Modifier.padding(vertical = 6.dp))
-            DrawerItem(
-                icon = { Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(22.dp)) },
-                label = "Copy latest response",
-                onClick = { onCloseDrawer(); onCopyLatest() },
-            )
-            DrawerItem(
-                icon = { Icon(Icons.Filled.Stop, contentDescription = null, modifier = Modifier.size(22.dp)) },
-                label = "Clear conversation",
-                onClick = { onCloseDrawer(); onClear() },
-            )
+
+            // Fixed horizontal actions card (RTL-compatible)
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)),
+            ) {
+                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 10.dp)) {
+                    DrawerActionCell(
+                        icon = { Icon(if (connected) Icons.Filled.LinkOff else Icons.Filled.Link, contentDescription = null, modifier = Modifier.size(22.dp)) },
+                        label = if (connected) "Disconnect" else if (connecting) "Connecting…" else "Connect",
+                        tint = if (connected) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                        enabled = !connecting,
+                        onClick = { onCloseDrawer(); if (connected) onDisconnect() else onConnect() },
+                        modifier = Modifier.weight(1f),
+                    )
+                    DrawerActionCell(
+                        icon = { Icon(Icons.Filled.Delete, contentDescription = null, modifier = Modifier.size(22.dp)) },
+                        label = "Clear chat",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        onClick = { onCloseDrawer(); onClear() },
+                        modifier = Modifier.weight(1f),
+                    )
+                    DrawerActionCell(
+                        icon = { Icon(Icons.Filled.ContentCopy, contentDescription = null, modifier = Modifier.size(22.dp)) },
+                        label = "Copy last",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        onClick = { onCloseDrawer(); onCopyLatest() },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
+
+            // Inline sessions — latest first, current highlighted
+            Text("Sessions", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (sessions.isEmpty()) {
+                Text(
+                    "No recent sessions yet. Connect to a Pi session and it will appear here.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            } else {
+                val visible = if (showAllSessions) sessions else sessions.take(5)
+                visible.forEach { session ->
+                    val key = "${session.host}:${session.port}"
+                    val isCurrent = key == currentSessionKey
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (isCurrent) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else Color.Transparent)
+                            .clickable { onCloseDrawer(); onSelectSession(session) }
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(9.dp)
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(if (isCurrent) PiGreen else MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)),
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                if (isCurrent) "Current Session" else session.label.ifBlank { key },
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (isCurrent && session.label.isNotBlank()) {
+                                Text(session.label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            } else if (!isCurrent) {
+                                Text(key, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+                            }
+                        }
+                        if (isCurrent) {
+                            Surface(color = PiGreen, shape = RoundedCornerShape(999.dp)) {
+                                Text("ACTIVE", color = Color.White, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
+                            }
+                        }
+                    }
+                }
+                if (sessions.size > 5) {
+                    TextButton(onClick = { showAllSessions = !showAllSessions }, modifier = Modifier.fillMaxWidth()) {
+                        Text(if (showAllSessions) "عرض أقل" else "عرض المزيد (${sessions.size - 5})")
+                    }
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun DrawerItem(
+private fun DrawerActionCell(
     icon: @Composable () -> Unit,
     label: String,
+    tint: Color,
     enabled: Boolean = true,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+        modifier = modifier
             .clip(RoundedCornerShape(12.dp))
             .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
+            .padding(vertical = 4.dp),
     ) {
-        icon()
-        Text(label, style = MaterialTheme.typography.bodyLarge, color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline)
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(tint.copy(alpha = 0.12f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            CompositionLocalProvider(LocalContentColor provides tint) { icon() }
+        }
+        Text(label, style = MaterialTheme.typography.labelSmall, color = tint, maxLines = 1)
     }
 }
 
@@ -1126,103 +1363,6 @@ private fun SettingsSwitchRow(
     }
 }
 
-@Composable
-private fun ScanningSessionsDialog() {
-    AlertDialog(
-        onDismissRequest = {},
-        title = { Text("Scanning sessions") },
-        text = {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 3.dp)
-                Text("Checking nearby Pi Remote ports…")
-            }
-        },
-        confirmButton = {},
-    )
-}
-
-@Composable
-private fun SessionPickerDialog(
-    candidates: List<SessionCandidate>,
-    currentHost: String,
-    currentPort: Int,
-    onDismiss: () -> Unit,
-    onPick: (SessionCandidate) -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Pi sessions") },
-        text = {
-            Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                if (candidates.isEmpty()) {
-                    Text("No sessions found nearby. Check host/token and try again.")
-                } else {
-                    candidates.forEach { candidate ->
-                        val isActive = candidate.host == currentHost && candidate.port == currentPort
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onPick(candidate) },
-                            shape = RoundedCornerShape(18.dp),
-                            colors = CardDefaults.cardColors(
-                                containerColor = when {
-                                    isActive -> MaterialTheme.colorScheme.primaryContainer
-                                    candidate.isIdle -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
-                                    else -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.75f)
-                                }
-                            ),
-                            border = if (isActive) {
-                                androidx.compose.foundation.BorderStroke(2.dp, PiGreen)
-                            } else {
-                                androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
-                            },
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(11.dp)
-                                        .clip(RoundedCornerShape(999.dp))
-                                        .background(if (candidate.isIdle) MaterialTheme.colorScheme.tertiary else PiGreen),
-                                )
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        Text("${candidate.host}:${candidate.port}", style = MaterialTheme.typography.titleSmall)
-                                        if (isActive) {
-                                            Surface(color = PiGreen, shape = RoundedCornerShape(999.dp)) {
-                                                Text(
-                                                    "ACTIVE",
-                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                                    color = Color.White,
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                )
-                                            }
-                                        }
-                                    }
-                                    Text(
-                                        "${if (candidate.isIdle) "Idle" else "Working"} • ${candidate.label}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
-    )
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun WelcomeScreen(
     working: Boolean,
@@ -1554,27 +1694,32 @@ private fun ChatCard(item: ChatItem, onToggleTool: () -> Unit, onCopy: () -> Uni
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = if (item.kind == ChatKind.Assistant) 6.dp else 12.dp),
                 verticalArrangement = Arrangement.spacedBy(5.dp),
             ) {
-                if (item.kind != ChatKind.Assistant) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            toolTitle(item),
-                            style = MaterialTheme.typography.labelLarge,
-                            color = when (item.kind) {
-                                ChatKind.User -> MaterialTheme.colorScheme.onSecondaryContainer
-                                ChatKind.Tool -> MaterialTheme.colorScheme.onTertiaryContainer
-                                ChatKind.Error -> MaterialTheme.colorScheme.onErrorContainer
-                                else -> MaterialTheme.colorScheme.primary
-                            },
-                            modifier = Modifier.weight(1f),
+                val timeFmt = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+                // Header label: real identity (أنت / actual model name)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        when (item.kind) {
+                            ChatKind.User -> "أنت"
+                            ChatKind.Assistant -> item.model ?: "Pi"
+                            else -> toolTitle(item)
+                        },
+                        style = MaterialTheme.typography.labelLarge,
+                        color = when (item.kind) {
+                            ChatKind.User -> MaterialTheme.colorScheme.onSecondaryContainer
+                            ChatKind.Assistant -> MaterialTheme.colorScheme.primary
+                            ChatKind.Tool -> MaterialTheme.colorScheme.onTertiaryContainer
+                            ChatKind.Error -> MaterialTheme.colorScheme.onErrorContainer
+                            else -> MaterialTheme.colorScheme.primary
+                        },
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (item.kind == ChatKind.Tool) {
+                        Icon(
+                            if (item.expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                            contentDescription = if (item.expanded) "Collapse" else "Expand",
+                            tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.size(18.dp),
                         )
-                        if (item.kind == ChatKind.Tool) {
-                            Icon(
-                                if (item.expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
-                                contentDescription = if (item.expanded) "Collapse" else "Expand",
-                                tint = MaterialTheme.colorScheme.onTertiaryContainer,
-                                modifier = Modifier.size(18.dp),
-                            )
-                        }
                     }
                 }
                 if (item.kind == ChatKind.Assistant) {
@@ -1586,6 +1731,27 @@ private fun ChatCard(item: ChatItem, onToggleTool: () -> Unit, onCopy: () -> Uni
                         fontFamily = if (item.kind == ChatKind.Tool) FontFamily.Monospace else FontFamily.Default,
                         maxLines = if (item.kind == ChatKind.Tool && !item.expanded) 3 else Int.MAX_VALUE,
                         overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                // Metadata line — only real values, never invented.
+                val meta = when (item.kind) {
+                    ChatKind.User -> "أنت · ${timeFmt.format(Date(item.ts))}"
+                    ChatKind.Assistant -> buildString {
+                        append(item.model ?: "Pi")
+                        append(" · ")
+                        append(timeFmt.format(Date(item.ts)))
+                        if (item.endedAt > item.startedAt) {
+                            append(" · ")
+                            append(String.format(Locale.US, "%.1fs", (item.endedAt - item.startedAt) / 1000.0))
+                        }
+                    }
+                    else -> null
+                }
+                if (meta != null) {
+                    Text(
+                        meta,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
                     )
                 }
             }
@@ -1622,9 +1788,14 @@ private fun MarkdownText(text: String) {
                     }
                     i++ // skip closing fence
                     val label = when (info.lowercase()) {
-                        "bash", "sh", "shell", "zsh", "console" -> "Bash Code"
+                        "bash", "sh", "shell", "zsh" -> "Bash Code"
                         "output", "terminal", "log" -> "Terminal Output"
-                        "" -> "Code Block"
+                        "" -> when {
+                            codeLines.any { it.trimStart().startsWith("$ ") } -> "Terminal Output"
+                            codeLines.any { it.contains("BUILD SUCCESSFUL") || it.contains("BUILD FAILED") || it.contains("Task :") } -> "Build Output"
+                            codeLines.any { it.contains("Exception") || it.contains("error:", ignoreCase = true) } -> "Error"
+                            else -> "Code Block"
+                        }
                         else -> info.replaceFirstChar { it.uppercase() } + " Code"
                     }
                     MarkdownCodeBlock(codeLines.joinToString("\n"), label)
@@ -1711,6 +1882,8 @@ private fun MarkdownCodeBlock(code: String, label: String) {
                     fontFamily = FontFamily.Monospace,
                     modifier = Modifier
                         .fillMaxWidth()
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState())
                         .horizontalScroll(rememberScrollState())
                         .padding(12.dp),
                 )
@@ -1837,4 +2010,47 @@ private tailrec fun Context.findActivity(): android.app.Activity? = when (this) 
     is android.app.Activity -> this
     is android.content.ContextWrapper -> baseContext.findActivity()
     else -> null
+}
+
+// ---- Local transcript persistence -------------------------------------------
+// Keeps the FULL ordered event stream (user/model/tool/code) across session
+// switches and full app restarts. Capped to the last 400 events.
+
+private fun serializeMessages(list: List<ChatItem>): String {
+    val arr = JSONArray()
+    list.takeLast(400).forEach { m ->
+        arr.put(
+            JSONObject()
+                .put("id", m.id)
+                .put("kind", m.kind.name)
+                .put("title", m.title)
+                .put("text", m.text)
+                .put("ts", m.ts)
+                .put("model", m.model ?: "")
+                .put("startedAt", m.startedAt)
+                .put("endedAt", m.endedAt)
+        )
+    }
+    return arr.toString()
+}
+
+private fun deserializeMessages(json: String): List<ChatItem> {
+    val arr = JSONArray(json)
+    val out = mutableListOf<ChatItem>()
+    for (i in 0 until arr.length()) {
+        val o = arr.optJSONObject(i) ?: continue
+        val kind = runCatching { ChatKind.valueOf(o.optString("kind")) }.getOrDefault(ChatKind.System)
+        out += ChatItem(
+            id = o.optLong("id", System.nanoTime()),
+            kind = kind,
+            title = o.optString("title"),
+            text = o.optString("text"),
+            expanded = false,
+            ts = o.optLong("ts", System.currentTimeMillis()),
+            model = o.optString("model").takeIf { it.isNotBlank() },
+            startedAt = o.optLong("startedAt", 0L),
+            endedAt = o.optLong("endedAt", 0L),
+        )
+    }
+    return out.sortedBy { it.id }
 }
