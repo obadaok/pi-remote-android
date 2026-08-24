@@ -10,7 +10,7 @@ import { MAX_WEBSOCKET_PAYLOAD_BYTES, ProtocolSession, redactForLog } from "@nuc
 import type { AuthService } from "./auth.js";
 import type { V2SessionManager } from "./v2-session.js";
 
-type Options = { auth: AuthService; host: string; port: number; headCursor: () => number; minimumCursor: () => number; onStop?: () => void; allowNoAuthFromLoopback?: boolean; control?: { accept: (ws: WebSocket) => void }; v2?: { manager: V2SessionManager; history: (processId: string) => any[]; command?: (processId: string, value: any) => void; verifier?: (token?: string) => string }; sessions?: { piCommand: string; profileRoot: string; legacyToken?: string } };
+type Options = { auth: AuthService; host: string; port: number; headCursor: () => number; minimumCursor: () => number; onStop?: () => void; allowNoAuthFromLoopback?: boolean; control?: { accept: (ws: WebSocket) => void }; v2?: { manager: V2SessionManager; history: (processId: string) => any[]; command?: (processId: string, value: any) => void; verifier?: (token?: string) => string }; sessions?: { piCommand: string; profileRoot: string; legacyToken?: string; liveProcesses?: () => Array<{ processId: string; registeredAt: number; live: boolean }> } };
 const reject = (socket: NodeJS.WritableStream, status: number) => { socket.write(`HTTP/1.1 ${status} ${status === 401 ? "Unauthorized" : "Not Found"}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); (socket as any).destroy(); };
 const validAdvertisedHost = (value: string) => value.length <= 253 && (isIP(value) !== 0 || /^(?=.{1,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(?:\.(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?))*$/.test(value));
 
@@ -64,7 +64,8 @@ export function createControlServer(o: Options) {
       return;
     }
     if (o.sessions && req.method === "GET" && path === "/admin/sessions") {
-      res.writeHead(200); res.end(JSON.stringify({ sessions: [...spawned.entries()].map(([pid, entry]) => ({ pid, alive: alive(pid), startedAt: entry.startedAt })) }));
+      const live = (() => { try { return o.sessions.liveProcesses?.() ?? []; } catch { return []; } })();
+      res.writeHead(200); res.end(JSON.stringify({ sessions: [...spawned.entries()].map(([pid, entry]) => ({ pid, alive: alive(pid), startedAt: entry.startedAt })), live }));
       return;
     }
     if (!ok) { res.writeHead(o.auth.failureReason(address) === "rate_limited" ? 429 : 401, { "content-type": "application/json", "cache-control": "no-store" }); res.end('{"error":"unauthorized"}'); return; }

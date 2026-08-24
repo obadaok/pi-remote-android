@@ -697,6 +697,27 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
         reconnectAttempts = 0
     }
 
+    val liveSessions = remember { mutableStateListOf<org.json.JSONObject>() }
+
+    fun fetchLiveSessions() {
+        if (host.isBlank() || port.isBlank()) return
+        val url = Uri.Builder().scheme("http").encodedAuthority("${host.trim()}:${port.toIntOrNull() ?: 37890}").appendPath("admin").appendPath("sessions").build().toString()
+        val request = Request.Builder().url(url).header("Authorization", "Bearer ${token.trim()}").get().build()
+        client.newCall(request).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) { }
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                val body = response.body?.string().orEmpty()
+                mainHandler.post {
+                    liveSessions.clear()
+                    runCatching {
+                        val arr = org.json.JSONObject(body).optJSONArray("live")
+                        for (i in 0 until (arr?.length() ?: 0)) arr?.optJSONObject(i)?.let { liveSessions.add(it) }
+                    }
+                }
+            }
+        })
+    }
+
     fun spawnSession() {
         if (host.isBlank() || port.isBlank()) {
             addMessage(ChatKind.Error, "Spawn failed", "Set host and port in settings first.")
@@ -816,6 +837,9 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
     MaterialTheme(colorScheme = if (isSystemInDarkTheme()) PiDarkColors else PiLightColors) {
         val scope = rememberCoroutineScope()
         val drawerState = rememberDrawerState(DrawerValue.Closed)
+        LaunchedEffect(drawerState) {
+            snapshotFlow { drawerState.isOpen }.collect { if (it) fetchLiveSessions() }
+        }
         CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
         ModalNavigationDrawer(
             drawerState = drawerState,
@@ -837,6 +861,7 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                     },
                     onCopyLatest = { copyText("Assistant", latestAssistantText()) },
                     onNewSession = { spawnSession() },
+                    liveSessions = liveSessions.toList(),
                     onClear = {
                         messages.clear()
                         activeAssistantId = null
@@ -1148,6 +1173,7 @@ private fun AppDrawerContent(
     onCopyLatest: () -> Unit,
     onClear: () -> Unit,
     onNewSession: () -> Unit,
+    liveSessions: List<org.json.JSONObject>,
     onCloseDrawer: () -> Unit,
 ) {
     var showAllSessions by remember { mutableStateOf(false) }
@@ -1229,6 +1255,43 @@ private fun AppDrawerContent(
 
             // Inline sessions — latest first, current highlighted
             Text("Sessions", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            liveSessions.forEach { entry ->
+                val live = entry.optBoolean("live")
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(9.dp)
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(if (live) PiGreen else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)),
+                    )
+                    Column {
+                        Text(
+                            if (live) "Current session" else "Closed session",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (live) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
+                        )
+                        Text(
+                            "#" + entry.optString("processId").take(8),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.outline,
+                        )
+                    }
+                }
+            }
+            if (liveSessions.none { it.optBoolean("live") }) {
+                Text(
+                    "لا توجد جلسات حية — أنشئ جلسة أو أعد تشغيل جلسة Terminal",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            }
             if (sessions.isEmpty()) {
                 Text(
                     "No recent sessions yet. Connect to a Pi session and it will appear here.",
