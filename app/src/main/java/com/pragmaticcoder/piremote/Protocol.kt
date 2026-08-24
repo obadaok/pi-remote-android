@@ -150,10 +150,38 @@ private fun toolStartDetails(args: JSONObject?): String {
 private fun jsonValueToDisplay(value: Any?): String {
     if (value == null || value == JSONObject.NULL) return ""
     return when (value) {
-        is JSONObject -> value.toString(2)
-        is JSONArray -> value.toString(2)
+        is JSONObject -> extractReadablePayload(value)
+        is JSONArray -> {
+            val parts = (0 until value.length()).map { jsonValueToDisplay(value.opt(it)) }.filter { it.isNotBlank() }
+            if (parts.isEmpty()) value.toString(2) else parts.joinToString("\n\n")
+        }
         else -> value.toString()
     }
+}
+
+/** Unwraps tool-result envelopes like {"content":[{"type":"text","text":"..."}]} to plain text. */
+private fun extractReadablePayload(obj: JSONObject): String {
+    // Prefer text blocks inside content arrays (Anthropic-style tool results).
+    val content = obj.opt("content")
+    if (content is JSONArray) {
+        val texts = (0 until content.length()).mapNotNull { item ->
+            val entry = content.optJSONObject(item) ?: return@mapNotNull null
+            val type = entry.optString("type")
+            when {
+                type == "text" || entry.has("text") -> entry.optString("text").takeIf { it.isNotBlank() }
+                type == "image" -> "[image output]"
+                else -> null
+            }
+        }.filter { it.isNotBlank() }
+        if (texts.isNotEmpty()) return texts.joinToString("\n")
+    }
+    if (content is String && content.isNotBlank()) return content
+    // Common scalar wrappers.
+    for (key in listOf("text", "output", "stdout", "result", "message")) {
+        val v = obj.opt(key)
+        if (v is String && v.isNotBlank()) return v
+    }
+    return obj.toString(2)
 }
 
 private fun parseHistory(obj: JSONObject): IncomingEffects {

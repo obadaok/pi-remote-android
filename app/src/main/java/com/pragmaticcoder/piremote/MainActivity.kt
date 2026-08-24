@@ -66,6 +66,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -199,6 +200,7 @@ data class ChatItem(
     val model: String? = null,
     val startedAt: Long = 0L,
     val endedAt: Long = 0L,
+    val imagePaths: List<String> = emptyList(),
 )
 
 internal data class RecentSession(
@@ -534,17 +536,27 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
 
         when (type) {
             "prompt", "steer", "follow_up" -> {
+                // Persist image attachments locally so the echo can render real previews.
+                val previewPaths = mutableListOf<String>()
+                for (attachment in attachments) {
+                    val b64 = attachment.base64 ?: continue
+                    runCatching {
+                        val bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+                        val file = java.io.File(context.cacheDir, "preview-${System.nanoTime()}-${attachment.name.replace(Regex("[^A-Za-z0-9._-]"), "_")}")
+                        file.writeBytes(bytes)
+                        previewPaths.add(file.absolutePath)
+                    }
+                }
+                val fileNames = attachments.filter { it.base64 == null }.map { it.name }
                 val displayedText = listOfNotNull(
                     text.orEmpty().takeIf { it.isNotBlank() },
-                    attachments.takeIf { it.isNotEmpty() }?.joinToString(prefix = "Attachments: ") { it.name },
+                    fileNames.takeIf { it.isNotEmpty() }?.joinToString(prefix = "Attachments: ") { it },
                 ).joinToString("\n")
                 if (displayedText.isNotBlank()) pendingUserEchoes.add(displayedText)
                 if (pendingUserEchoes.size > 10) pendingUserEchoes.removeRange(0, pendingUserEchoes.size - 10)
-                addMessage(
-                ChatKind.User,
-                type.replace('_', ' ').replaceFirstChar { it.uppercase() },
-                displayedText
-                )
+                messages.add(ChatItem(nextId(), ChatKind.User, type.replace('_', ' ').replaceFirstChar { it.uppercase() }, displayedText, ts = System.currentTimeMillis(), imagePaths = previewPaths))
+                scrollVersion++
+                if (messages.size > 250) messages.removeRange(0, messages.size - 250)
             }
             "abort" -> addMessage(ChatKind.System, "Abort", "Abort requested")
             "get_state", "ping" -> addMessage(ChatKind.System, type, "Requested")
@@ -655,7 +667,7 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                     if (suppressNextCloseNotice) {
                         suppressNextCloseNotice = false
                     } else {
-                        addMessage(ChatKind.System, "Disconnected", "$code $reason")
+                        if (!prefs.getBoolean("autoReconnect", false)) addMessage(ChatKind.System, "Disconnected", "$code $reason")
                         scheduleReconnect(
                             mainHandler,
                             reconnectAttempts++,
@@ -673,7 +685,7 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                     connecting = false
                     working = false
                     status = "Error"
-                    addMessage(ChatKind.Error, "Connection error", t.message ?: "Unknown error")
+                    if (!prefs.getBoolean("autoReconnect", false)) addMessage(ChatKind.Error, "Connection error", t.message ?: "Unknown error")
                     scheduleReconnect(
                         mainHandler,
                         reconnectAttempts++,
@@ -1836,9 +1848,27 @@ private fun ChatCard(item: ChatItem, onToggleTool: () -> Unit, onCopy: () -> Uni
                         )
                     }
                 }
+                if (item.imagePaths.isNotEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        item.imagePaths.forEach { path ->
+                            val bitmap = remember(path) { runCatching { android.graphics.BitmapFactory.decodeFile(path) }.getOrNull() }
+                            if (bitmap != null) {
+                                Image(
+                                    bitmap = bitmap.asImageBitmap(),
+                                    contentDescription = "Attachment preview",
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 260.dp)
+                                        .clip(RoundedCornerShape(12.dp)),
+                                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                                )
+                            }
+                        }
+                    }
+                }
                 if (item.kind == ChatKind.Assistant) {
                     MarkdownText(text = item.text.ifBlank { "…" })
-                } else {
+                } else if (item.text.isNotBlank()) {
                     Text(
                         item.text.ifBlank { "…" },
                         style = MaterialTheme.typography.bodyMedium.copy(textDirection = TextDirection.Content),
