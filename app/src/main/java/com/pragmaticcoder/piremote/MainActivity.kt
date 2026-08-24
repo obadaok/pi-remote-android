@@ -35,6 +35,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
@@ -54,9 +57,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
@@ -66,6 +71,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.draw.clip
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -91,8 +97,8 @@ class MainActivity : ComponentActivity() {
         pendingUri = intent?.data?.toString()
         pendingSharedUris = extractSharedUris(intent)
         pendingSharedText = extractSharedText(intent)
-        window.statusBarColor = android.graphics.Color.parseColor("#031F1B")
-        window.navigationBarColor = android.graphics.Color.parseColor("#031F1B")
+        window.statusBarColor = android.graphics.Color.parseColor("#170609")
+        window.navigationBarColor = android.graphics.Color.parseColor("#170609")
         setContent { PiRemoteApp(connectionUri = pendingUri, sharedUris = pendingSharedUris, sharedText = pendingSharedText) }
     }
 
@@ -121,49 +127,50 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private val PiGreen = Color(0xFF10B981)
-private val PiGreenDeep = Color(0xFF031F1B)
-private val PiGreenDark = Color(0xFF064E3B)
-private val PiGreenSoft = Color(0xFFD1FAE5)
-private val PiTeal = Color(0xFF14B8A6)
+// Crimson royal branding: primary #A4133C / #C9184A, accent #FF4D6D
+private val PiGreen = Color(0xFFC9184A)
+private val PiGreenDeep = Color(0xFF170609)
+private val PiGreenDark = Color(0xFF800F2F)
+private val PiGreenSoft = Color(0xFFFFCCD5)
+private val PiTeal = Color(0xFFFF4D6D)
 private val PiAmber = Color(0xFFF59E0B)
 
 private val PiDarkColors = darkColorScheme(
     primary = PiGreenSoft,
-    onPrimary = PiGreenDeep,
-    primaryContainer = PiGreenDark,
-    onPrimaryContainer = Color(0xFFECFDF5),
+    onPrimary = Color(0xFF3D0715),
+    primaryContainer = Color(0xFFA4133C),
+    onPrimaryContainer = Color(0xFFFFE5EA),
     secondary = PiTeal,
-    secondaryContainer = Color(0xFF042F2E),
-    onSecondaryContainer = Color(0xFFCCFBF1),
+    secondaryContainer = Color(0xFF2B0812),
+    onSecondaryContainer = Color(0xFFFFD6DE),
     tertiary = PiAmber,
     tertiaryContainer = Color(0xFF5B3A09),
     onTertiaryContainer = Color(0xFFFFF7ED),
     background = PiGreenDeep,
-    surface = Color(0xFF062A25),
-    surfaceVariant = Color(0xFF0B332E),
-    onSurface = Color(0xFFF0FDFA),
-    outline = Color(0xFF8BB7AD),
+    surface = Color(0xFF20090E),
+    surfaceVariant = Color(0xFF2B1016),
+    onSurface = Color(0xFFFFF0F2),
+    outline = Color(0xFFB0949C),
     error = Color(0xFFFCA5A5),
     errorContainer = Color(0xFF7F1D1D),
     onErrorContainer = Color(0xFFFFE4E6),
 )
 
 private val PiLightColors = lightColorScheme(
-    primary = Color(0xFF047857),
+    primary = Color(0xFFA4133C),
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFD1FAE5),
-    onPrimaryContainer = Color(0xFF022C22),
-    secondary = Color(0xFF0F766E),
-    secondaryContainer = Color(0xFFCCFBF1),
-    onSecondaryContainer = Color(0xFF042F2E),
+    primaryContainer = Color(0xFFFFD9E0),
+    onPrimaryContainer = Color(0xFF4A0511),
+    secondary = Color(0xFFC9184A),
+    secondaryContainer = Color(0xFFFFE1E7),
+    onSecondaryContainer = Color(0xFF5C0E23),
     tertiary = Color(0xFFD97706),
     tertiaryContainer = Color(0xFFFEF3C7),
     onTertiaryContainer = Color(0xFF451A03),
-    background = Color(0xFFF3FCF8),
+    background = Color(0xFFFFF5F7),
     surface = Color.White,
-    surfaceVariant = Color(0xFFE6F5F0),
-    outline = Color(0xFF5F7F77),
+    surfaceVariant = Color(0xFFF7E6EA),
+    outline = Color(0xFF8A6B73),
 )
 
 enum class ChatKind { User, Assistant, Tool, System, Error }
@@ -641,10 +648,12 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
     MaterialTheme(colorScheme = if (isSystemInDarkTheme()) PiDarkColors else PiLightColors) {
         val scope = rememberCoroutineScope()
         val drawerState = rememberDrawerState(DrawerValue.Closed)
+        CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
         ModalNavigationDrawer(
             drawerState = drawerState,
             drawerContent = {
-                AppDrawerContent(
+                CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                    AppDrawerContent(
                     connected = connected,
                     connecting = connecting,
                     sessionInfo = sessionInfo,
@@ -660,13 +669,16 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                     },
                     onCloseDrawer = { scope.launch { drawerState.close() } },
                 )
+                }
             },
         ) {
+        CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
         Scaffold(
             topBar = {
                 MinimalTopBar(
                     connected = connected,
                     connecting = connecting,
+                    sessionName = sessionName(sessionInfo, connected),
                     modelLabel = modelLabel(sessionInfo),
                     onOpenDrawer = { scope.launch { drawerState.open() } },
                     onNewChat = {
@@ -682,8 +694,8 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
             Column(
                 modifier = Modifier
                     .padding(padding)
+                    .consumeWindowInsets(padding)
                     .imePadding()
-                    .navigationBarsPadding()
                     .fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -730,6 +742,8 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                 if (showSessionPicker) {
                     SessionPickerDialog(
                         candidates = sessionCandidates.sortedWith(compareBy<SessionCandidate> { it.isIdle }.thenBy { it.port }),
+                        currentHost = host.trim(),
+                        currentPort = port.toIntOrNull() ?: -1,
                         onDismiss = { showSessionPicker = false },
                         onPick = { candidate ->
                             host = candidate.host
@@ -755,9 +769,11 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                     onAttach = { picker.launch("*/*") },
                     onClearAttachments = { attachments.clear() },
                     onRemoveAttachment = { attachment -> attachments.remove(attachment) },
-                    onAbort = { sendJson("abort") },
+                onAbort = { sendJson("abort") },
                 )
             }
+        }
+        }
         }
         }
 
@@ -835,11 +851,22 @@ private fun modelLabel(sessionInfo: String): String {
     return if (parts.size >= 2) parts[1] else if (sessionInfo.isNotBlank()) sessionInfo else "Not connected"
 }
 
+private fun sessionName(sessionInfo: String, connected: Boolean): String {
+    val cwd = sessionInfo.substringAfterLast('•', "").trim()
+    val name = cwd.substringAfterLast('/').substringAfterLast('\\')
+    return when {
+        name.isNotBlank() -> name
+        connected -> "Pi session"
+        else -> "No active session"
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MinimalTopBar(
     connected: Boolean,
     connecting: Boolean,
+    sessionName: String,
     modelLabel: String,
     onOpenDrawer: () -> Unit,
     onNewChat: () -> Unit,
@@ -852,34 +879,46 @@ private fun MinimalTopBar(
             }
         },
         title = {
-            Row(
+            Column(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically,
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(9.dp)
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(
-                            when {
-                                connected -> PiGreen
-                                connecting -> PiAmber
-                                else -> MaterialTheme.colorScheme.error
-                            }
-                        ),
-                )
-                Spacer(Modifier.width(6.dp))
+                Row(
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(9.dp)
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(
+                                when {
+                                    connected -> PiGreen
+                                    connecting -> PiAmber
+                                    else -> MaterialTheme.colorScheme.error
+                                }
+                            ),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        when {
+                            connecting -> "Connecting…"
+                            connected -> sessionName
+                            else -> "Offline — $sessionName"
+                        },
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
                 Text(
-                    when {
-                        connecting -> "Connecting…"
-                        connected -> modelLabel
-                        else -> "Offline"
-                    },
-                    fontSize = 12.sp,
+                    modelLabel,
+                    fontSize = 10.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = MaterialTheme.colorScheme.outline,
                 )
             }
         },
@@ -932,9 +971,12 @@ private fun AppDrawerContent(
                         modifier = Modifier.size(34.dp),
                     )
                 }
-                Column {
-                    Text("π Remote", style = MaterialTheme.typography.titleMedium)
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("πm Remote", style = MaterialTheme.typography.titleMedium)
                     Text(sessionInfo, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+                IconButton(onClick = onCloseDrawer) {
+                    Icon(Icons.Filled.Close, contentDescription = "Close drawer")
                 }
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
@@ -1102,6 +1144,8 @@ private fun ScanningSessionsDialog() {
 @Composable
 private fun SessionPickerDialog(
     candidates: List<SessionCandidate>,
+    currentHost: String,
+    currentPort: Int,
     onDismiss: () -> Unit,
     onPick: (SessionCandidate) -> Unit,
 ) {
@@ -1109,20 +1153,65 @@ private fun SessionPickerDialog(
         onDismissRequest = onDismiss,
         title = { Text("Pi sessions") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
                 if (candidates.isEmpty()) {
                     Text("No sessions found nearby. Check host/token and try again.")
                 } else {
                     candidates.forEach { candidate ->
-                        ElevatedCard(
-                            modifier = Modifier.fillMaxWidth().clickable { onPick(candidate) },
-                            colors = CardDefaults.elevatedCardColors(
-                                containerColor = if (candidate.isIdle) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.secondaryContainer,
+                        val isActive = candidate.host == currentHost && candidate.port == currentPort
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onPick(candidate) },
+                            shape = RoundedCornerShape(18.dp),
+                            colors = CardDefaults.cardColors(
+                                containerColor = when {
+                                    isActive -> MaterialTheme.colorScheme.primaryContainer
+                                    candidate.isIdle -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                                    else -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.75f)
+                                }
                             ),
+                            border = if (isActive) {
+                                androidx.compose.foundation.BorderStroke(2.dp, PiGreen)
+                            } else {
+                                androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f))
+                            },
                         ) {
-                            Column(Modifier.padding(12.dp)) {
-                                Text("${candidate.host}:${candidate.port}", style = MaterialTheme.typography.titleSmall)
-                                Text(candidate.label, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(11.dp)
+                                        .clip(RoundedCornerShape(999.dp))
+                                        .background(if (candidate.isIdle) MaterialTheme.colorScheme.tertiary else PiGreen),
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        Text("${candidate.host}:${candidate.port}", style = MaterialTheme.typography.titleSmall)
+                                        if (isActive) {
+                                            Surface(color = PiGreen, shape = RoundedCornerShape(999.dp)) {
+                                                Text(
+                                                    "ACTIVE",
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                                    color = Color.White,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                )
+                                            }
+                                        }
+                                    }
+                                    Text(
+                                        "${if (candidate.isIdle) "Idle" else "Working"} • ${candidate.label}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
                             }
                         }
                     }
@@ -1466,23 +1555,34 @@ private fun ChatCard(item: ChatItem, onToggleTool: () -> Unit, onCopy: () -> Uni
                 verticalArrangement = Arrangement.spacedBy(5.dp),
             ) {
                 if (item.kind != ChatKind.Assistant) {
-                    Text(
-                        toolTitle(item),
-                        style = MaterialTheme.typography.labelLarge,
-                        color = when (item.kind) {
-                            ChatKind.User -> MaterialTheme.colorScheme.onSecondaryContainer
-                            ChatKind.Tool -> MaterialTheme.colorScheme.onTertiaryContainer
-                            ChatKind.Error -> MaterialTheme.colorScheme.onErrorContainer
-                            else -> MaterialTheme.colorScheme.primary
-                        },
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            toolTitle(item),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = when (item.kind) {
+                                ChatKind.User -> MaterialTheme.colorScheme.onSecondaryContainer
+                                ChatKind.Tool -> MaterialTheme.colorScheme.onTertiaryContainer
+                                ChatKind.Error -> MaterialTheme.colorScheme.onErrorContainer
+                                else -> MaterialTheme.colorScheme.primary
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (item.kind == ChatKind.Tool) {
+                            Icon(
+                                if (item.expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                                contentDescription = if (item.expanded) "Collapse" else "Expand",
+                                tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    }
                 }
                 if (item.kind == ChatKind.Assistant) {
                     MarkdownText(text = item.text.ifBlank { "…" })
                 } else {
                     Text(
                         item.text.ifBlank { "…" },
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.bodyMedium.copy(textDirection = TextDirection.Content),
                         fontFamily = if (item.kind == ChatKind.Tool) FontFamily.Monospace else FontFamily.Default,
                         maxLines = if (item.kind == ChatKind.Tool && !item.expanded) 3 else Int.MAX_VALUE,
                         overflow = TextOverflow.Ellipsis,
@@ -1505,6 +1605,7 @@ private fun toolContainerColor(item: ChatItem): Color {
 @Composable
 private fun MarkdownText(text: String) {
     val lines = text.lines()
+    val bodyStyle = MaterialTheme.typography.bodyMedium.copy(textDirection = TextDirection.Content)
     var i = 0
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
         while (i < lines.size) {
@@ -1512,6 +1613,7 @@ private fun MarkdownText(text: String) {
             when {
                 // Fenced code blocks ```
                 trimmed.startsWith("```") -> {
+                    val info = trimmed.removePrefix("```").trim()
                     val codeLines = mutableListOf<String>()
                     i++
                     while (i < lines.size && !lines[i].trimStart().startsWith("```")) {
@@ -1519,7 +1621,13 @@ private fun MarkdownText(text: String) {
                         i++
                     }
                     i++ // skip closing fence
-                    MarkdownCodeBlock(codeLines.joinToString("\n"))
+                    val label = when (info.lowercase()) {
+                        "bash", "sh", "shell", "zsh", "console" -> "Bash Code"
+                        "output", "terminal", "log" -> "Terminal Output"
+                        "" -> "Code Block"
+                        else -> info.replaceFirstChar { it.uppercase() } + " Code"
+                    }
+                    MarkdownCodeBlock(codeLines.joinToString("\n"), label)
                 }
                 trimmed.startsWith("# ") -> MarkdownHeading(trimmed.substring(2), level = 1)
                 trimmed.startsWith("## ") -> MarkdownHeading(trimmed.substring(3), level = 2)
@@ -1535,7 +1643,7 @@ private fun MarkdownText(text: String) {
                         )
                         Text(
                             parseInlineMarkdown(trimmed.substring(2), MaterialTheme.colorScheme.surfaceVariant),
-                            style = MaterialTheme.typography.bodyMedium,
+                            style = bodyStyle,
                         )
                     }
                 }
@@ -1550,7 +1658,7 @@ private fun MarkdownText(text: String) {
                 trimmed.isBlank() -> Spacer(Modifier.height(6.dp))
                 else -> Text(
                     parseInlineMarkdown(trimmed, MaterialTheme.colorScheme.surfaceVariant),
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = bodyStyle,
                 )
             }
             i++
@@ -1559,18 +1667,65 @@ private fun MarkdownText(text: String) {
 }
 
 @Composable
-private fun MarkdownCodeBlock(code: String) {
+private fun MarkdownCodeBlock(code: String, label: String) {
+    var expanded by remember { mutableStateOf(false) }
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f),
-        shape = RoundedCornerShape(10.dp),
+        shape = RoundedCornerShape(12.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.2f)),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Text(
-            code,
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
-            modifier = Modifier.padding(10.dp),
-        )
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = if (expanded) "Collapse" else "Expand",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "${code.lines().size} lines",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            }
+            if (expanded) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
+                Text(
+                    code,
+                    style = MaterialTheme.typography.bodySmall.copy(textDirection = TextDirection.Ltr),
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(12.dp),
+                )
+            } else if (code.isNotBlank()) {
+                Text(
+                    code.lines().take(1).firstOrNull().orEmpty(),
+                    style = MaterialTheme.typography.bodySmall.copy(textDirection = TextDirection.Ltr),
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 8.dp),
+                )
+            }
+        }
     }
 }
 
@@ -1581,12 +1736,27 @@ private fun MarkdownHeading(text: String, level: Int) {
         2 -> MaterialTheme.typography.titleMedium
         else -> MaterialTheme.typography.titleSmall
     }
-    Text(
-        parseInlineMarkdown(text, Color.Transparent),
-        style = style,
-        fontWeight = FontWeight.Bold,
-        color = MaterialTheme.colorScheme.primary,
-    )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(IntrinsicSize.Min)
+            .padding(top = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .width(4.dp)
+                .fillMaxHeight()
+                .clip(RoundedCornerShape(999.dp))
+                .background(PiTeal),
+        )
+        Text(
+            parseInlineMarkdown(text, Color.Transparent),
+            style = style.copy(textDirection = TextDirection.Content),
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.primary,
+        )
+    }
 }
 
 /** Renders **bold**, `inline code` and strips raw markers instead of printing them. */
