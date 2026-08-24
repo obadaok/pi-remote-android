@@ -697,6 +697,32 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
         reconnectAttempts = 0
     }
 
+    fun spawnSession() {
+        if (host.isBlank() || port.isBlank()) {
+            addMessage(ChatKind.Error, "Spawn failed", "Set host and port in settings first.")
+            return
+        }
+        val url = Uri.Builder().scheme("http").encodedAuthority("${host.trim()}:${port.toIntOrNull() ?: 37890}").appendPath("admin").appendPath("sessions").appendPath("spawn").build().toString()
+        val request = Request.Builder().url(url).header("Authorization", "Bearer ${token.trim()}").post(okhttp3.RequestBody.create(null, ByteArray(0))).build()
+        client.newCall(request).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                mainHandler.post { addMessage(ChatKind.Error, "New session", e.message ?: "Request failed") }
+            }
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                val body = response.body?.string().orEmpty()
+                mainHandler.post {
+                    if (response.isSuccessful) {
+                        val pid = runCatching { org.json.JSONObject(body).optInt("pid") }.getOrDefault(0)
+                        addMessage(ChatKind.System, "New session", if (pid > 0) "Pi session created (pid $pid). Connecting…" else "Pi session created. Connecting…")
+                        connect(clearMessages = true)
+                    } else {
+                        addMessage(ChatKind.Error, "New session", "HTTP ${response.code}")
+                    }
+                }
+            }
+        })
+    }
+
     fun shouldAutoReconnect(): Boolean =
         prefs.getBoolean("autoReconnect", false) && host.isNotBlank() && port.isNotBlank() && token.isNotBlank()
 
@@ -810,6 +836,7 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                         connect()
                     },
                     onCopyLatest = { copyText("Assistant", latestAssistantText()) },
+                    onNewSession = { spawnSession() },
                     onClear = {
                         messages.clear()
                         activeAssistantId = null
@@ -1120,6 +1147,7 @@ private fun AppDrawerContent(
     onSelectSession: (RecentSession) -> Unit,
     onCopyLatest: () -> Unit,
     onClear: () -> Unit,
+    onNewSession: () -> Unit,
     onCloseDrawer: () -> Unit,
 ) {
     var showAllSessions by remember { mutableStateOf(false) }
@@ -1190,6 +1218,14 @@ private fun AppDrawerContent(
             }
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
+
+            DrawerActionCell(
+                icon = { Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(22.dp)) },
+                label = "New session",
+                tint = MaterialTheme.colorScheme.primary,
+                onClick = { onCloseDrawer(); onNewSession() },
+                modifier = Modifier.fillMaxWidth(),
+            )
 
             // Inline sessions — latest first, current highlighted
             Text("Sessions", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
