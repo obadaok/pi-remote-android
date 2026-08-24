@@ -745,12 +745,27 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
         }
     }
 
-    // New content / viewport changes: pin ONLY when already stuck. Instant snap
-    // (no animation) keeps the last messages glued under the keyboard edge.
-    LaunchedEffect(scrollVersion, keyboardVisible) {
+    // New content: pin ONLY when already stuck. Instant snap (no animation)
+    // keeps the last messages glued under the keyboard edge.
+    LaunchedEffect(scrollVersion) {
         if (messages.isNotEmpty() && stickToBottom) {
             withFrameNanos { }
             listState.scrollToItem(messages.lastIndex)
+        }
+    }
+
+    // Keyboard inset animation: re-pin EVERY frame for the duration of the IME
+    // open/close animation, so the last message stays glued just above the
+    // input bar (single-shot pinning races the animation and leaves the chat
+    // stranded at the top with a blank gap).
+    LaunchedEffect(keyboardVisible) {
+        if (messages.isNotEmpty() && stickToBottom) {
+            val deadline = System.nanoTime() + 500_000_000L
+            while (System.nanoTime() < deadline) {
+                withFrameNanos { }
+                if (!stickToBottom) break
+                listState.scrollToItem(messages.lastIndex)
+            }
         }
     }
 
@@ -1840,6 +1855,7 @@ private fun MarkdownText(text: String) {
 @Composable
 private fun MarkdownCodeBlock(code: String, label: String) {
     var expanded by remember { mutableStateOf(false) }
+    val context = LocalContext.current
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f),
         shape = RoundedCornerShape(12.dp),
@@ -1873,6 +1889,21 @@ private fun MarkdownCodeBlock(code: String, label: String) {
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.outline,
                 )
+                IconButton(
+                    onClick = {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText(label, code))
+                        Toast.makeText(context, "$label copied", Toast.LENGTH_SHORT).show()
+                    },
+                    modifier = Modifier.size(28.dp),
+                ) {
+                    Icon(
+                        Icons.Filled.ContentCopy,
+                        contentDescription = "Copy code",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(15.dp),
+                    )
+                }
             }
             if (expanded) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.15f))
