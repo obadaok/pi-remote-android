@@ -19,6 +19,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -40,7 +42,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -1047,7 +1054,7 @@ private fun ComposerPanel(
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
     ) {
         Column(
-            modifier = Modifier.padding(8.dp),
+            modifier = Modifier.padding(PaddingValues(start = 10.dp, end = 10.dp, top = 8.dp, bottom = 16.dp)),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             if (attachments.isNotEmpty()) {
@@ -1063,45 +1070,57 @@ private fun ComposerPanel(
                     .heightIn(min = if (keyboardVisible) 60.dp else 64.dp),
                 minLines = 1,
                 maxLines = if (keyboardVisible) 3 else 4,
-                shape = RoundedCornerShape(18.dp),
+                shape = RoundedCornerShape(26.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                    unfocusedBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f),
+                    focusedContainerColor = MaterialTheme.colorScheme.surface,
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                    cursorColor = MaterialTheme.colorScheme.primary,
+                ),
                 trailingIcon = {
                     Button(
                         onClick = { sendWithPulse() },
                         enabled = sendEnabled,
-                        modifier = Modifier.padding(end = 8.dp),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                        shape = RoundedCornerShape(999.dp),
-                    ) { Text(if (sentPulse) "Sent" else "Send") }
+                        modifier = Modifier.padding(end = 6.dp),
+                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp),
+                        shape = RoundedCornerShape(50),
+                    ) { Text(if (sentPulse) "Sent ✓" else "Send", maxLines = 1, softWrap = false) }
                 },
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                 keyboardActions = KeyboardActions(onSend = { if (sendEnabled) sendWithPulse() }),
             )
 
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+            ) {
                     OutlinedButton(
                         onClick = { haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove); onAttach() },
                         enabled = attachments.size < 4,
-                        modifier = Modifier.weight(1.05f).height(38.dp),
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
-                    ) { Text("＋ File", maxLines = 1, style = MaterialTheme.typography.labelMedium) }
+                        modifier = Modifier.height(38.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+                    ) { Text("＋ File", maxLines = 1, softWrap = false, style = MaterialTheme.typography.labelMedium) }
                     modes.forEach { (value, label) ->
                         FilterChip(
                             selected = selectedMode == value,
                             onClick = { selectedMode = value; haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove) },
-                            label = { Text(label, style = MaterialTheme.typography.labelMedium) },
-                            modifier = Modifier.weight(if (value == "follow_up") 1.15f else 0.9f).height(38.dp),
+                            label = { Text(label, maxLines = 1, softWrap = false, style = MaterialTheme.typography.labelMedium) },
+                            modifier = Modifier.height(38.dp),
                         )
                     }
                     Button(
                         onClick = { confirmAbort = true },
                         enabled = connected && working,
-                        modifier = Modifier.weight(0.95f).height(38.dp),
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                        modifier = Modifier.height(38.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 2.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = MaterialTheme.colorScheme.error,
                             contentColor = MaterialTheme.colorScheme.onError,
                         ),
-                    ) { Text("Abort", maxLines = 1, style = MaterialTheme.typography.labelMedium) }
+                    ) { Text("Abort", maxLines = 1, softWrap = false, style = MaterialTheme.typography.labelMedium) }
                 }
         }
     }
@@ -1176,14 +1195,22 @@ private fun StatusPanel(status: String, connected: Boolean, working: Boolean, se
         )
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(title, color = content, style = MaterialTheme.typography.titleMedium, maxLines = 1)
+                Text(title, color = content, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 val nickname = sessionNickname(sessionInfo)
                 if (nickname.isNotBlank()) {
                     Surface(
                         color = Color.White.copy(alpha = 0.14f),
                         shape = RoundedCornerShape(999.dp),
                     ) {
-                        Text(nickname, modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp), color = content, style = MaterialTheme.typography.labelSmall)
+                        Text(
+                            nickname,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                            color = content,
+                            style = MaterialTheme.typography.labelSmall,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 }
             }
@@ -1245,13 +1272,17 @@ private fun ChatCard(item: ChatItem, onToggleTool: () -> Unit, onCopy: () -> Uni
                         else -> MaterialTheme.colorScheme.primary
                     },
                 )
-                Text(
-                    item.text.ifBlank { "…" },
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontFamily = if (item.kind == ChatKind.Tool) FontFamily.Monospace else FontFamily.Default,
-                    maxLines = if (item.kind == ChatKind.Tool && !item.expanded) 3 else Int.MAX_VALUE,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                if (item.kind == ChatKind.Assistant) {
+                    MarkdownText(text = item.text.ifBlank { "…" })
+                } else {
+                    Text(
+                        item.text.ifBlank { "…" },
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontFamily = if (item.kind == ChatKind.Tool) FontFamily.Monospace else FontFamily.Default,
+                        maxLines = if (item.kind == ChatKind.Tool && !item.expanded) 3 else Int.MAX_VALUE,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
     }
@@ -1263,6 +1294,72 @@ private fun toolContainerColor(item: ChatItem): Color {
         item.title.contains("failed", ignoreCase = true) -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.9f)
         item.title.contains("running", ignoreCase = true) -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.82f)
         else -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f)
+    }
+}
+
+@Composable
+private fun MarkdownText(text: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        text.lines().forEach { line ->
+            val trimmed = line.trimStart()
+            when {
+                trimmed.startsWith("# ") -> MarkdownHeading(trimmed.substring(2), level = 1)
+                trimmed.startsWith("## ") -> MarkdownHeading(trimmed.substring(3), level = 2)
+                trimmed.startsWith("### ") -> MarkdownHeading(trimmed.substring(4), level = 3)
+                trimmed.isBlank() -> Spacer(Modifier.height(6.dp))
+                else -> Text(
+                    parseInlineMarkdown(trimmed, MaterialTheme.colorScheme.surfaceVariant),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarkdownHeading(text: String, level: Int) {
+    val style = when (level) {
+        1 -> MaterialTheme.typography.titleLarge
+        2 -> MaterialTheme.typography.titleMedium
+        else -> MaterialTheme.typography.titleSmall
+    }
+    Text(
+        parseInlineMarkdown(text, Color.Transparent),
+        style = style,
+        fontWeight = FontWeight.Bold,
+        color = MaterialTheme.colorScheme.primary,
+    )
+}
+
+/** Renders **bold**, `inline code` and strips raw markers instead of printing them. */
+private fun parseInlineMarkdown(line: String, codeBackground: Color): AnnotatedString = buildAnnotatedString {
+    var i = 0
+    while (i < line.length) {
+        when {
+            line.startsWith("**", i) -> {
+                val end = line.indexOf("**", i + 2)
+                if (end > i + 1) {
+                    withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(line.substring(i + 2, end)) }
+                    i = end + 2
+                } else {
+                    append(line[i]); i++
+                }
+            }
+            line[i] == '`' -> {
+                val end = line.indexOf('`', i + 1)
+                if (end > i) {
+                    withStyle(
+                        SpanStyle(fontFamily = FontFamily.Monospace, background = codeBackground)
+                    ) { append(line.substring(i + 1, end)) }
+                    i = end + 1
+                } else {
+                    append(line[i]); i++
+                }
+            }
+            else -> {
+                append(line[i]); i++
+            }
+        }
     }
 }
 
