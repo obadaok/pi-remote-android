@@ -27,7 +27,7 @@ internal fun parsePiRemoteUri(
     }.getOrNull()
 }
 
-private fun queryParameter(rawQuery: String?, name: String): String? {
+internal fun queryParameter(rawQuery: String?, name: String): String? {
     if (rawQuery.isNullOrBlank()) return null
     return rawQuery.split('&')
         .mapNotNull { part ->

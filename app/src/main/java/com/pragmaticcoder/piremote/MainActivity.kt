@@ -91,6 +91,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaType
 import okio.ByteString
 import org.json.JSONArray
 import org.json.JSONObject
@@ -221,6 +222,43 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
     var host by remember { mutableStateOf(prefs.getString("host", "192.168.1.") ?: "192.168.1.") }
     var port by remember { mutableStateOf(prefs.getString("port", "37891") ?: "37891") }
     var token by remember { mutableStateOf(prefs.getString("token", "") ?: "") }
+    // Active backend + per-backend saved settings. Top-level host/port/token
+    // always mirror the ACTIVE backend so the existing connect/UI flow works.
+    var backend by remember {
+        mutableStateOf(
+            runCatching { BackendKind.valueOf(prefs.getString("backend", BackendKind.Pi.name) ?: BackendKind.Pi.name) }
+                .getOrDefault(BackendKind.Pi)
+        )
+    }
+    // One-time migration: seed Pi settings from legacy top-level keys.
+    LaunchedEffect(Unit) {
+        if (prefs.getString("pi.host", null) == null && prefs.getString("host", null) != null) {
+            prefs.edit()
+                .putString("pi.host", prefs.getString("host", "") ?: "")
+                .putString("pi.port", prefs.getString("port", "") ?: "")
+                .putString("pi.token", prefs.getString("token", "") ?: "")
+                .apply()
+        }
+        if (prefs.getString("oc.port", null) == null) prefs.edit().putString("oc.port", "4096").apply()
+    }
+    fun hostKey(kind: BackendKind) = if (kind == BackendKind.Pi) "pi.host" else "oc.host"
+    fun portKey(kind: BackendKind) = if (kind == BackendKind.Pi) "pi.port" else "oc.port"
+    fun tokenKey(kind: BackendKind) = if (kind == BackendKind.Pi) "pi.token" else "oc.password"
+
+    fun saveConnectionSettings() {
+        prefs.edit()
+            .putString(hostKey(backend), host.trim())
+            .putString(portKey(backend), port.trim().ifBlank { if (backend == BackendKind.Pi) "37891" else "4096" })
+            .putString(tokenKey(backend), token.trim())
+            .apply()
+    }
+
+    fun loadBackendSettings(kind: BackendKind) {
+        host = prefs.getString(hostKey(kind), "") ?: ""
+        port = prefs.getString(portKey(kind), if (kind == BackendKind.Pi) "37891" else "4096") ?: ""
+        token = prefs.getString(tokenKey(kind), "") ?: ""
+    }
+
     var input by remember { mutableStateOf("") }
     val attachments = remember { mutableStateListOf<AttachmentItem>() }
     var connected by remember { mutableStateOf(false) }
@@ -265,15 +303,73 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     val keyboardVisible = WindowInsets.ime.getBottom(density) > 0
 
+    val client = remember {
+        OkHttpClient.Builder()
+            .pingInterval(20, TimeUnit.SECONDS)
+            .build()
+    }
+    var webSocket by remember { mutableStateOf<WebSocket?>(null) }
+    var ocEventCall by remember { mutableStateOf<okhttp3.Call?>(null) }
+    var ocSessionId by remember { mutableStateOf(prefs.getString("oc.sessionId", "") ?: "") }
+
+    // Late-bound reference so backend code can trigger a reconnect without a
+    // forward declaration cycle (assigned right after connect() is defined).
+    var connectRef: (Boolean) -> Unit by remember { mutableStateOf<(Boolean) -> Unit>({}) }
+
+    fun nextId() = System.nanoTime()
+
+    fun disconnect() {
+        prefs.edit().putBoolean("autoReconnect", false).apply()
+        webSocket?.close(1000, "Android disconnect")
+        webSocket = null
+        ocEventCall?.cancel()
+        ocEventCall = null
+        connected = false
+        connecting = false
+        working = false
+        status = "Disconnected"
+        reconnectAttempts = 0
+    }
+
+    /** Switches backend without losing either side's saved settings. */
+    fun switchBackend(kind: BackendKind) {
+        if (kind == backend) return
+        saveConnectionSettings()
+        disconnect()
+        backend = kind
+        prefs.edit().putString("backend", kind.name).apply()
+        loadBackendSettings(kind)
+        messages.clear()
+        activeToolMessages.clear()
+        activeAssistantId = null
+        sessionInfo = "No session"
+        working = false
+        scrollVersion++
+        autoConnectRequest++
+    }
+
     fun applyConnectionUri(uriText: String): Boolean {
-        val parsed = parsePiRemoteUri(uriText, ConnectionSettings(host, port, token)) ?: return false
+        val trimmed = uriText.trimStart()
+        val targetBackend = when {
+            trimmed.startsWith("oc-remote://") -> BackendKind.OpenCode
+            trimmed.startsWith("pi-remote://") -> BackendKind.Pi
+            else -> return false
+        }
+        val fallback = ConnectionSettings("", if (targetBackend == BackendKind.Pi) "37891" else "4096", "")
+        val parsed = (
+            if (targetBackend == BackendKind.OpenCode) parseOpenCodeUri(uriText, fallback)
+            else parsePiRemoteUri(uriText, fallback)
+            ) ?: return false
+        // Loading a QR for the other backend switches to it; the current
+        // backend's settings stay saved and untouched.
+        if (targetBackend != backend) switchBackend(targetBackend)
         host = parsed.host
         port = parsed.port
         token = parsed.token
         prefs.edit()
-            .putString("host", host.trim())
-            .putString("port", port.trim().ifBlank { "37891" })
-            .putString("token", token.trim())
+            .putString(hostKey(backend), host.trim())
+            .putString(portKey(backend), port.trim().ifBlank { if (backend == BackendKind.Pi) "37891" else "4096" })
+            .putString(tokenKey(backend), token.trim())
             .apply()
         autoConnectRequest++
         return true
@@ -282,15 +378,6 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
     LaunchedEffect(connectionUri) {
         connectionUri?.let { applyConnectionUri(it) }
     }
-
-    val client = remember {
-        OkHttpClient.Builder()
-            .pingInterval(20, TimeUnit.SECONDS)
-            .build()
-    }
-    var webSocket by remember { mutableStateOf<WebSocket?>(null) }
-
-    fun nextId() = System.nanoTime()
 
     fun persistMessages() {
         runCatching {
@@ -485,14 +572,6 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
         if (index >= 0) messages[index] = messages[index].copy(expanded = !messages[index].expanded)
     }
 
-    fun saveConnectionSettings() {
-        prefs.edit()
-            .putString("host", host.trim())
-            .putString("port", port.trim().ifBlank { "37891" })
-            .putString("token", token.trim())
-            .apply()
-    }
-
     fun normalizeUserEcho(text: String): String {
         return text
             .lineSequence()
@@ -516,7 +595,305 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
             (echoed.contains("[image]") || echoed.contains("[file]"))
     }
 
+    // ---- OpenCode backend (official HTTP + SSE API) ---------------------------
+    val ocSessions = remember { mutableStateListOf<OpenCodeSessionEntry>() }
+
+    fun openCodeBaseUrl(): String =
+        "http://${host.trim().ifBlank { "127.0.0.1" }}:${port.toIntOrNull() ?: 4096}"
+
+    /** Applies protocol effects to the chat — shared by both backends' event paths. */
+    fun applyEffects(effects: IncomingEffects) {
+        effects.messages.forEach { addMessage(it.kind, it.title, it.text) }
+        effects.assistantDeltas.forEach(::appendAssistantDelta)
+        effects.toolUpdates.forEach { upsertToolMessage(it.toolCallId, it.title, it.text, it.done) }
+        effects.sessionInfo?.let { info ->
+            sessionInfo = info
+            refreshCurrentRecentLabel(info)
+        }
+        effects.working?.let { working = it }
+        effects.supportsBinaryFileAttachments?.let { supportsBinaryFileAttachments = it }
+        if (effects.clearActiveAssistant) finalizeActiveAssistant()
+    }
+
+    fun openCodeFail(message: String) {
+        mainHandler.post {
+            connected = false
+            connecting = false
+            working = false
+            status = "Error"
+            addMessage(ChatKind.Error, "OpenCode", message)
+            scheduleReconnect(
+                mainHandler,
+                reconnectAttempts++,
+                shouldAutoReconnect = { prefs.getBoolean("autoReconnect", false) && host.isNotBlank() && port.isNotBlank() },
+                connect = { connectRef(false) },
+                setStatus = { status = it },
+            )
+        }
+    }
+
+    fun startOpenCodeStream(base: String, auth: String) {
+        val request = Request.Builder()
+            .url("$base/event")
+            .header("Authorization", auth)
+            .header("Accept", "text/event-stream")
+            .build()
+        val call = client.newCall(request)
+        ocEventCall = call
+        call.enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                if (call.isCanceled()) return
+                openCodeFail(e.message ?: "Event stream failed")
+            }
+
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                response.use { r ->
+                    if (!r.isSuccessful) {
+                        openCodeFail("Event stream HTTP ${r.code}")
+                        return
+                    }
+                    val source = r.body?.source() ?: run { openCodeFail("Empty stream"); return }
+                    try {
+                        while (true) {
+                            val line = source.readUtf8Line() ?: break
+                            val data = extractSseData(line) ?: continue
+                            val effects = runCatching {
+                                parseOpenCodeEvent(JSONObject(data), ocSessionId.ifBlank { null })
+                            }.getOrNull() ?: continue
+                            mainHandler.post { applyEffects(effects) }
+                        }
+                        // Server closed the stream cleanly.
+                        if (!call.isCanceled()) openCodeFail("Event stream closed")
+                    } catch (_: java.io.IOException) {
+                        if (!call.isCanceled()) openCodeFail("Event stream interrupted")
+                    }
+                }
+            }
+        })
+    }
+
+    fun loadOpenCodeHistory() {
+        val id = ocSessionId
+        if (id.isBlank()) return
+        val request = Request.Builder()
+            .url("${openCodeBaseUrl()}/api/session/$id/message")
+            .header("Authorization", openCodeAuthHeader(token.trim()))
+            .get()
+            .build()
+        client.newCall(request).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {}
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                val body = response.body?.string().orEmpty()
+                response.close()
+                mainHandler.post {
+                    messages.clear()
+                    activeToolMessages.clear()
+                    activeAssistantId = null
+                    scrollVersion++
+                    applyEffects(parseOpenCodeHistory(body))
+                    // Derive a status line: state • model • directory/title
+                    val model = runCatching {
+                        val arr = JSONObject(body).optJSONArray("data")
+                        var found = ""
+                        for (i in (arr?.length() ?: 0) - 1 downTo 0) {
+                            val m = arr?.optJSONObject(i) ?: continue
+                            if (m.optString("type") == "assistant") {
+                                val mo = m.optJSONObject("model")
+                                found = "${mo?.optString("providerID").orEmpty()}/${mo?.optString("id").orEmpty()}"
+                                break
+                            }
+                        }
+                        found
+                    }.getOrDefault("").ifBlank { "opencode" }
+                    sessionInfo = "Idle • $model • OpenCode"
+                }
+            }
+        })
+    }
+
+    fun refreshOcSessions() {
+        if (backend != BackendKind.OpenCode) return
+        val request = Request.Builder()
+            .url("${openCodeBaseUrl()}/api/session")
+            .header("Authorization", openCodeAuthHeader(token.trim()))
+            .get()
+            .build()
+        client.newCall(request).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {}
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                val body = response.body?.string().orEmpty()
+                response.close()
+                val parsed = parseOpenCodeSessions(body)
+                mainHandler.post {
+                    ocSessions.clear()
+                    ocSessions.addAll(parsed.take(20))
+                    if (ocSessionId.isBlank() && parsed.isNotEmpty()) {
+                        ocSessionId = parsed.first().id
+                        prefs.edit().putString("oc.sessionId", ocSessionId).apply()
+                    }
+                }
+            }
+        })
+    }
+
+    fun connectOpenCode(clearMessages: Boolean = false) {
+        if (connecting) return
+        ocEventCall?.cancel()
+        ocEventCall = null
+        val cleanHost = host.trim()
+        val cleanPort = port.trim().ifBlank { "4096" }
+        val sessionKey = "oc:$cleanHost:$cleanPort:${ocSessionId.take(12)}"
+        if (clearMessages) {
+            messages.clear()
+            activeToolMessages.clear()
+            activeAssistantId = null
+            scrollVersion++
+        } else {
+            val previousKey = prefs.getString("lastSessionKey", null)
+            if (previousKey != null && previousKey != sessionKey && messages.isNotEmpty()) {
+                persistMessages()
+                messages.clear()
+                activeToolMessages.clear()
+                activeAssistantId = null
+                scrollVersion++
+            }
+            prefs.edit().putString("lastSessionKey", sessionKey).apply()
+        }
+        saveConnectionSettings()
+        prefs.edit().putBoolean("autoReconnect", true).apply()
+        connecting = true
+        status = "Connecting..."
+        val base = openCodeBaseUrl()
+        val auth = openCodeAuthHeader(token.trim())
+        val health = Request.Builder().url("$base/global/health").header("Authorization", auth).build()
+        client.newCall(health).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                openCodeFail("Cannot reach OpenCode server (${e.message ?: "network error"})")
+            }
+
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                val ok = response.isSuccessful
+                val code = response.code
+                response.close()
+                when {
+                    code == 401 -> openCodeFail("Authentication failed — check the server password in settings.")
+                    !ok -> openCodeFail("OpenCode server HTTP $code")
+                    else -> mainHandler.post {
+                        connected = true
+                        connecting = false
+                        showSettings = false
+                        working = false
+                        supportsBinaryFileAttachments = false
+                        status = "Connected"
+                        reconnectAttempts = 0
+                        recordRecentSession(cleanHost, cleanPort.toIntOrNull() ?: 4096, "")
+                        loadOpenCodeHistory()
+                        refreshOcSessions()
+                        startOpenCodeStream(base, auth)
+                    }
+                }
+            }
+        })
+    }
+
+    fun sendOpenCode(type: String, text: String?) {
+        if (!connected) {
+            addMessage(ChatKind.Error, "Not connected", "Connect to OpenCode first.")
+            return
+        }
+        if (type == "abort") {
+            val request = Request.Builder()
+                .url("${openCodeBaseUrl()}/api/session/$ocSessionId/interrupt")
+                .header("Authorization", openCodeAuthHeader(token.trim()))
+                .post(okhttp3.RequestBody.create(null, ByteArray(0)))
+                .build()
+            client.newCall(request).enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                    mainHandler.post { addMessage(ChatKind.Error, "Abort failed", e.message ?: "") }
+                }
+                override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) { response.close() }
+            })
+            addMessage(ChatKind.System, "Abort", "Abort requested")
+            return
+        }
+        if (type !in listOf("prompt", "steer", "follow_up")) return
+        if (attachments.isNotEmpty()) {
+            addMessage(ChatKind.System, "Attachments", "File attachments are not supported on the OpenCode backend yet — sending text only.")
+        }
+        val promptText = text.orEmpty()
+        if (promptText.isBlank()) return
+
+        fun postPrompt(sessionId: String) {
+            val delivery = when (type) {
+                "steer" -> "steer"
+                "follow_up" -> "queue"
+                else -> null
+            }
+            val payload = JSONObject().put("prompt", JSONObject().put("text", promptText))
+            if (delivery != null && working) payload.put("delivery", delivery)
+            val request = Request.Builder()
+                .url("${openCodeBaseUrl()}/api/session/$sessionId/prompt")
+                .header("Authorization", openCodeAuthHeader(token.trim()))
+                .post(okhttp3.RequestBody.create("application/json".toMediaType(), payload.toString()))
+                .build()
+            client.newCall(request).enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                    mainHandler.post { addMessage(ChatKind.Error, "Send failed", e.message ?: "Request failed") }
+                }
+                override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                    val ok = response.isSuccessful
+                    val errBody = if (!ok) response.body?.string().orEmpty().take(200) else ""
+                    response.close()
+                    mainHandler.post {
+                        if (!ok) {
+                            addMessage(ChatKind.Error, "Send failed", errBody.ifBlank { "HTTP error" })
+                        } else {
+                            messages.add(ChatItem(nextId(), ChatKind.User, type.replace('_', ' ').replaceFirstChar { it.uppercase() }, promptText, ts = System.currentTimeMillis()))
+                            scrollVersion++
+                            attachments.clear()
+                        }
+                    }
+                }
+            })
+        }
+
+        if (ocSessionId.isBlank()) {
+            val request = Request.Builder()
+                .url("${openCodeBaseUrl()}/api/session")
+                .header("Authorization", openCodeAuthHeader(token.trim()))
+                .post(okhttp3.RequestBody.create("application/json".toMediaType(), JSONObject().put("title", "Phone session").toString()))
+                .build()
+            client.newCall(request).enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                    mainHandler.post { addMessage(ChatKind.Error, "New session failed", e.message ?: "") }
+                }
+                override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                    val body = response.body?.string().orEmpty()
+                    response.close()
+                    val id = runCatching {
+                        JSONObject(body).optJSONObject("data")?.optString("id").orEmpty()
+                    }.getOrDefault("")
+                    mainHandler.post {
+                        if (id.startsWith("ses")) {
+                            ocSessionId = id
+                            prefs.edit().putString("oc.sessionId", id).apply()
+                            postPrompt(id)
+                        } else {
+                            addMessage(ChatKind.Error, "New session failed", body.take(200))
+                        }
+                    }
+                }
+            })
+        } else {
+            postPrompt(ocSessionId)
+        }
+    }
+
     fun sendJson(type: String, text: String? = null) {
+        if (backend == BackendKind.OpenCode) {
+            sendOpenCode(type, text)
+            return
+        }
         val ws = webSocket
         if (ws == null || !connected) {
             addMessage(ChatKind.Error, "Not connected", "Connect to Pi before sending commands.")
@@ -573,6 +950,10 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
     }
 
     fun connect(clearMessages: Boolean = false) {
+        if (backend == BackendKind.OpenCode) {
+            connectOpenCode(clearMessages)
+            return
+        }
         if (connecting) return
         if (webSocket != null) suppressNextCloseNotice = true
         webSocket?.close(1000, "Reconnect")
@@ -696,22 +1077,16 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                 }
             }
         })
-    }
-
-    fun disconnect() {
-        prefs.edit().putBoolean("autoReconnect", false).apply()
-        webSocket?.close(1000, "Android disconnect")
-        webSocket = null
-        connected = false
-        connecting = false
-        working = false
-        status = "Disconnected"
-        reconnectAttempts = 0
+        connectRef = { clear -> connect(clear) }
     }
 
     val liveSessions = remember { mutableStateListOf<org.json.JSONObject>() }
 
     fun fetchLiveSessions() {
+        if (backend == BackendKind.OpenCode) {
+            refreshOcSessions()
+            return
+        }
         if (host.isBlank() || port.isBlank()) return
         val url = Uri.Builder().scheme("http").encodedAuthority("${host.trim()}:${port.toIntOrNull() ?: 37890}").appendPath("admin").appendPath("sessions").build().toString()
         val request = Request.Builder().url(url).header("Authorization", "Bearer ${token.trim()}").get().build()
@@ -731,6 +1106,38 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
     }
 
     fun spawnSession() {
+        if (backend == BackendKind.OpenCode) {
+            if (!connected && host.isBlank()) {
+                addMessage(ChatKind.Error, "New session", "Configure the OpenCode server first.")
+                return
+            }
+            val request = Request.Builder()
+                .url("${openCodeBaseUrl()}/api/session")
+                .header("Authorization", openCodeAuthHeader(token.trim()))
+                .post(okhttp3.RequestBody.create("application/json".toMediaType(), JSONObject().put("title", "Phone session").toString()))
+                .build()
+            client.newCall(request).enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                    mainHandler.post { addMessage(ChatKind.Error, "New session", e.message ?: "Request failed") }
+                }
+                override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                    val body = response.body?.string().orEmpty()
+                    response.close()
+                    val id = runCatching { JSONObject(body).optJSONObject("data")?.optString("id").orEmpty() }.getOrDefault("")
+                    mainHandler.post {
+                        if (id.startsWith("ses")) {
+                            ocSessionId = id
+                            prefs.edit().putString("oc.sessionId", id).apply()
+                            addMessage(ChatKind.System, "New session", "OpenCode session created. Connecting…")
+                            connect(clearMessages = true)
+                        } else {
+                            addMessage(ChatKind.Error, "New session", body.take(200))
+                        }
+                    }
+                }
+            })
+            return
+        }
         if (host.isBlank() || port.isBlank()) {
             addMessage(ChatKind.Error, "Spawn failed", "Set host and port in settings first.")
             return
@@ -861,6 +1268,17 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                     connected = connected,
                     connecting = connecting,
                     sessionInfo = sessionInfo,
+                    backend = backend,
+                    onSwitchBackend = { kind -> switchBackend(kind) },
+                    ocSessions = ocSessions.toList(),
+                    activeOcSessionId = ocSessionId,
+                    onSelectOcSession = { entry ->
+                        if (entry.id != ocSessionId) {
+                            ocSessionId = entry.id
+                            prefs.edit().putString("oc.sessionId", entry.id).apply()
+                            connect(clearMessages = true)
+                        }
+                    },
                     sessions = recentSessions.toList(),
                     currentSessionKey = "$host.trim():${port.toIntOrNull() ?: -1}",
                     onConnect = { connect() },
@@ -998,6 +1416,7 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                     connected = connected,
                     working = working,
                     keyboardVisible = keyboardVisible,
+                    backendLabel = backend.label,
                     onSend = { type ->
                         sendJson(type, input)
                         input = ""
@@ -1016,6 +1435,8 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
 
         if (showSettings) {
             SettingsSheet(
+                backend = backend,
+                onBackendChange = { kind -> switchBackend(kind) },
                 host = host,
                 onHostChange = { host = it },
                 port = port,
@@ -1045,7 +1466,7 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                     qrScanner.launch(
                         ScanOptions()
                             .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                            .setPrompt("Scan Pi Remote QR")
+                            .setPrompt("Scan Pi or OpenCode Remote QR")
                             .setBeepEnabled(false)
                             .setOrientationLocked(false)
                     )
@@ -1177,6 +1598,11 @@ private fun AppDrawerContent(
     connected: Boolean,
     connecting: Boolean,
     sessionInfo: String,
+    backend: BackendKind,
+    onSwitchBackend: (BackendKind) -> Unit,
+    ocSessions: List<OpenCodeSessionEntry>,
+    activeOcSessionId: String,
+    onSelectOcSession: (OpenCodeSessionEntry) -> Unit,
     sessions: List<RecentSession>,
     currentSessionKey: String,
     onConnect: () -> Unit,
@@ -1190,13 +1616,58 @@ private fun AppDrawerContent(
 ) {
     var showAllSessions by remember { mutableStateOf(false) }
     ModalDrawerSheet(drawerContainerColor = MaterialTheme.colorScheme.surface) {
-        Column(
-            modifier = Modifier
-                .padding(horizontal = 14.dp, vertical = 20.dp)
-                .fillMaxHeight()
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
+        // Backend selector — Pi / OpenCode
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)),
+            ) {
+                Column(modifier = Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("Backend", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        BackendKind.entries.forEach { kind ->
+                            val selected = backend == kind
+                            Surface(
+                                onClick = { if (!selected && !connecting) onSwitchBackend(kind) },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+                                border = androidx.compose.foundation.BorderStroke(
+                                    1.dp,
+                                    if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
+                                ),
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center,
+                                    modifier = Modifier.padding(vertical = 10.dp),
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(8.dp)
+                                            .clip(RoundedCornerShape(999.dp))
+                                            .background(if (selected && connected) PiGreen else Color.Transparent),
+                                     )
+                                     Spacer(Modifier.width(6.dp))
+                                     Text(
+                                         kind.label,
+                                         style = MaterialTheme.typography.labelLarge,
+                                         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                         color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                     )
+                                 }
+                             }
+                         }
+                     }
+                 }
+             }
+
+         Column(
+             modifier = Modifier
+                 .padding(horizontal = 14.dp, vertical = 20.dp)
+                 .fillMaxHeight()
+                 .verticalScroll(rememberScrollState()),
+             verticalArrangement = Arrangement.spacedBy(8.dp),
+         ) {
             // Header with explicit close button (works in RTL too)
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -1267,6 +1738,56 @@ private fun AppDrawerContent(
 
             // Inline sessions — latest first, current highlighted
             Text("Sessions", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (backend == BackendKind.OpenCode) {
+                ocSessions.forEach { entry ->
+                    val isCurrent = entry.id == activeOcSessionId
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (isCurrent) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else Color.Transparent)
+                            .clickable { onCloseDrawer(); onSelectOcSession(entry) }
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(9.dp)
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(if (isCurrent) PiGreen else MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)),
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                entry.title,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                "${entry.id.take(14)} · ${entry.directory.substringAfterLast('/')}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.outline,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        if (isCurrent) {
+                            Surface(color = PiGreen, shape = RoundedCornerShape(999.dp)) {
+                                Text("ACTIVE", color = Color.White, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
+                            }
+                        }
+                    }
+                }
+                if (ocSessions.isEmpty()) {
+                    Text(
+                        if (connected) "لا توجد جلسات — أرسل رسالة لإنشاء جلسة" else "اتصل بالسيرفر لعرض الجلسات",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                    )
+                }
+            } else {
             liveSessions.forEach { entry ->
                 val live = entry.optBoolean("live")
                 Row(
@@ -1303,6 +1824,7 @@ private fun AppDrawerContent(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline,
                 )
+            }
             }
             if (sessions.isEmpty()) {
                 Text(
@@ -1395,6 +1917,8 @@ private fun DrawerActionCell(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SettingsSheet(
+    backend: BackendKind,
+    onBackendChange: (BackendKind) -> Unit,
     host: String,
     onHostChange: (String) -> Unit,
     port: String,
@@ -1426,6 +1950,28 @@ private fun SettingsSheet(
         ) {
             Text("Connection", style = MaterialTheme.typography.titleLarge)
             Text(status, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+            // Backend selector
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                BackendKind.entries.forEach { kind ->
+                    val selected = backend == kind
+                    Surface(
+                        onClick = { if (!selected) onBackendChange(kind) },
+                        shape = RoundedCornerShape(14.dp),
+                        color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.3f)),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(
+                            kind.label,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(vertical = 12.dp),
+                        )
+                    }
+                }
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 OutlinedTextField(host, onHostChange, label = { Text("Host") }, modifier = Modifier.weight(1f), singleLine = true, shape = RoundedCornerShape(14.dp))
                 OutlinedTextField(port, onPortChange, label = { Text("Port") }, modifier = Modifier.width(110.dp), singleLine = true, shape = RoundedCornerShape(14.dp))
@@ -1433,7 +1979,7 @@ private fun SettingsSheet(
             OutlinedTextField(
                 value = token,
                 onValueChange = onTokenChange,
-                label = { Text("Token") },
+                label = { Text(if (backend == BackendKind.OpenCode) "Server password" else "Token") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
                 shape = RoundedCornerShape(14.dp),
@@ -1465,7 +2011,7 @@ private fun SettingsSheet(
                 modifier = Modifier.fillMaxWidth().height(48.dp),
                 shape = RoundedCornerShape(999.dp),
                 colors = if (connected) ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError) else ButtonDefaults.buttonColors(),
-            ) { Text(if (connected) "Disconnect" else if (connecting) "Connecting…" else "Connect to Pi") }
+            ) { Text(if (connected) "Disconnect" else if (connecting) "Connecting…" else "Connect to ${backend.label}") }
         }
     }
 }
@@ -1588,6 +2134,7 @@ private fun ComposerPanel(
     connected: Boolean,
     working: Boolean,
     keyboardVisible: Boolean,
+    backendLabel: String,
     onSend: (String) -> Unit,
     onAttach: () -> Unit,
     onClearAttachments: () -> Unit,
@@ -1673,7 +2220,7 @@ private fun ComposerPanel(
             OutlinedTextField(
                 value = input,
                 onValueChange = onInputChange,
-                placeholder = { Text(if (connected) "Message Pi…" else "Connect to send…") },
+                placeholder = { Text(if (connected) "Message $backendLabel…" else "Connect to send…") },
                 modifier = Modifier
                     .weight(1f)
                     .heightIn(min = 52.dp),
@@ -1710,7 +2257,7 @@ private fun ComposerPanel(
         AlertDialog(
             onDismissRequest = { confirmAbort = false },
             title = { Text("Abort current run?") },
-            text = { Text("This stops the active Pi response/tool run.") },
+            text = { Text("This stops the active response/tool run.") },
             dismissButton = { TextButton(onClick = { confirmAbort = false }) { Text("Cancel") } },
             confirmButton = {
                 Button(
