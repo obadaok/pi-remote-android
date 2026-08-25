@@ -18,6 +18,25 @@ HOST="${HOST:-0.0.0.0}"
 CFG_DIR="$HOME/.config/pi-remote"
 CFG="$CFG_DIR/opencode-server.json"
 
+# Resolve opencode binary (systemd user services have a minimal PATH).
+OPENCODE_BIN="${OPENCODE_BIN:-}"
+if [ -z "$OPENCODE_BIN" ]; then
+  OPENCODE_BIN="$(command -v opencode || true)"
+fi
+if [ -z "$OPENCODE_BIN" ] && [ -x "$HOME/.opencode/bin/opencode" ]; then
+  OPENCODE_BIN="$HOME/.opencode/bin/opencode"
+fi
+if [ -z "$OPENCODE_BIN" ] && [ -x "$HOME/.local/bin/opencode" ]; then
+  OPENCODE_BIN="$HOME/.local/bin/opencode"
+fi
+if [ -z "$OPENCODE_BIN" ] && [ -x "$HOME/.bun/bin/opencode" ]; then
+  OPENCODE_BIN="$HOME/.bun/bin/opencode"
+fi
+if [ -z "$OPENCODE_BIN" ]; then
+  echo "opencode binary not found" >&2
+  exit 1
+fi
+
 mkdir -p "$CFG_DIR"
 if [ ! -f "$CFG" ]; then
   PASS="$(python3 - <<'PY'
@@ -43,10 +62,16 @@ cleanup() { [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null || true; 
 trap cleanup EXIT INT TERM
 
 echo "[opencode-remote] starting opencode serve on $HOST:$PORT (password protected)"
-OPENCODE_SERVER_PASSWORD="$PASSWORD" opencode serve --hostname "$HOST" --port "$PORT" &
+OPENCODE_SERVER_PASSWORD="$PASSWORD" "$OPENCODE_BIN" serve --hostname "$HOST" --port "$PORT" &
 SERVER_PID=$!
 
-sleep 2
+for _ in $(seq 1 20); do
+  sleep 1
+  kill -0 "$SERVER_PID" 2>/dev/null || { echo "[opencode-remote] server process died" >&2; exit 1; }
+  if command -v curl >/dev/null 2>&1 && curl -sf -o /dev/null "http://127.0.0.1:$PORT/global/health"; then
+    break
+  fi
+done
 if ! kill -0 "$SERVER_PID" 2>/dev/null; then
   echo "[opencode-remote] server failed to start" >&2
   exit 1
