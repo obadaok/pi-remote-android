@@ -24,3 +24,4 @@ packages/*/dist/
 # Generated screenshots outside docs
 /e2e-*.png
 /piremote-current.png
+.kotlin/
