@@ -672,12 +672,40 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
         })
     }
 
-    fun loadOpenCodeHistory() {
-        val id = ocSessionId
-        if (id.isBlank()) return
+    fun renderOpenCodeHistory(effects: IncomingEffects, rawBody: String) {
+        mainHandler.post {
+            messages.clear()
+            activeToolMessages.clear()
+            activeAssistantId = null
+            scrollVersion++
+            applyEffects(effects)
+            if (effects.messages.isEmpty()) {
+                addMessage(ChatKind.System, "OpenCode", "جلسة فارغة — أرسل أول رسالة")
+            }
+            // Derive a status line: state • model • backend label
+            val model = runCatching {
+                val root = runCatching { JSONObject(rawBody) }.getOrNull()
+                val arr = root?.optJSONArray("data") ?: runCatching { JSONArray(rawBody) }.getOrNull()
+                var found = ""
+                val n = arr?.length() ?: 0
+                for (i in n - 1 downTo 0) {
+                    val m = arr?.optJSONObject(i) ?: continue
+                    val mo = m.optJSONObject("model") ?: m.optJSONObject("info")?.optJSONObject("model")
+                    if (mo != null && mo.optString("id").isNotBlank()) {
+                        found = "${mo.optString("providerID")}/${mo.optString("id")}"
+                        break
+                    }
+                }
+                found
+            }.getOrDefault("").ifBlank { "opencode" }
+            sessionInfo = "Idle • $model • OpenCode"
+        }
+    }
+
+    fun loadOpenCodeLegacyHistory(id: String, auth: String) {
         val request = Request.Builder()
-            .url("${openCodeBaseUrl()}/api/session/$id/message")
-            .header("Authorization", openCodeAuthHeader(token.trim()))
+            .url("${openCodeBaseUrl()}/session/$id/message?limit=100")
+            .header("Authorization", auth)
             .get()
             .build()
         client.newCall(request).enqueue(object : okhttp3.Callback {
@@ -685,27 +713,34 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
             override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                 val body = response.body?.string().orEmpty()
                 response.close()
-                mainHandler.post {
-                    messages.clear()
-                    activeToolMessages.clear()
-                    activeAssistantId = null
-                    scrollVersion++
-                    applyEffects(parseOpenCodeHistory(body))
-                    // Derive a status line: state • model • directory/title
-                    val model = runCatching {
-                        val arr = JSONObject(body).optJSONArray("data")
-                        var found = ""
-                        for (i in (arr?.length() ?: 0) - 1 downTo 0) {
-                            val m = arr?.optJSONObject(i) ?: continue
-                            if (m.optString("type") == "assistant") {
-                                val mo = m.optJSONObject("model")
-                                found = "${mo?.optString("providerID").orEmpty()}/${mo?.optString("id").orEmpty()}"
-                                break
-                            }
-                        }
-                        found
-                    }.getOrDefault("").ifBlank { "opencode" }
-                    sessionInfo = "Idle • $model • OpenCode"
+                renderOpenCodeHistory(parseOpenCodeLegacyHistory(body), body)
+            }
+        })
+    }
+
+    fun loadOpenCodeHistory() {
+        val id = ocSessionId
+        if (id.isBlank()) return
+        val auth = openCodeAuthHeader(token.trim())
+        val v2Request = Request.Builder()
+            .url("${openCodeBaseUrl()}/api/session/$id/message?limit=100")
+            .header("Authorization", auth)
+            .get()
+            .build()
+        client.newCall(v2Request).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {}
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                val body = response.body?.string().orEmpty()
+                response.close()
+                // v2 storage may be empty for sessions created by older server
+                // instances — fall back to the legacy endpoint in that case.
+                val v2Count = runCatching {
+                    JSONObject(body).optJSONArray("data")?.length() ?: 0
+                }.getOrDefault(0)
+                if (v2Count > 0) {
+                    renderOpenCodeHistory(parseOpenCodeHistory(body), body)
+                } else {
+                    loadOpenCodeLegacyHistory(id, auth)
                 }
             }
         })
@@ -730,6 +765,7 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                     if (ocSessionId.isBlank() && parsed.isNotEmpty()) {
                         ocSessionId = parsed.first().id
                         prefs.edit().putString("oc.sessionId", ocSessionId).apply()
+                        if (connected) loadOpenCodeHistory()
                     }
                 }
             }
@@ -1273,11 +1309,11 @@ fun PiRemoteApp(connectionUri: String? = null, sharedUris: List<String> = emptyL
                     ocSessions = ocSessions.toList(),
                     activeOcSessionId = ocSessionId,
                     onSelectOcSession = { entry ->
-                        if (entry.id != ocSessionId) {
-                            ocSessionId = entry.id
-                            prefs.edit().putString("oc.sessionId", entry.id).apply()
-                            connect(clearMessages = true)
-                        }
+                        val changed = entry.id != ocSessionId
+                        ocSessionId = entry.id
+                        prefs.edit().putString("oc.sessionId", entry.id).apply()
+                        if (changed || !connected) connect(clearMessages = true)
+                        else loadOpenCodeHistory()
                     },
                     sessions = recentSessions.toList(),
                     currentSessionKey = "$host.trim():${port.toIntOrNull() ?: -1}",

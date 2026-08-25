@@ -177,6 +177,30 @@ internal fun parseOpenCodeHistory(body: String): IncomingEffects {
     }.getOrDefault(IncomingEffects())
 }
 
+/**
+ * Legacy `GET /session/{id}/message` shape: bare array of
+ * `{info: {role, time}, parts: [{type: "text"|"reasoning"|...}]}`.
+ * Used as fallback because the v2 endpoint may return an empty page for
+ * sessions stored by older server instances.
+ */
+internal fun parseOpenCodeLegacyHistory(body: String): IncomingEffects {
+    return runCatching {
+        val arr = JSONArray(body.trim().let { if (it.startsWith("[")) it else "[]" })
+        val messages = mutableListOf<IncomingChatMessage>()
+        for (i in 0 until arr.length()) {
+            val m = arr.optJSONObject(i) ?: continue
+            val info = m.optJSONObject("info") ?: continue
+            val role = info.optString("role")
+            val text = openCodeBlocksToText(m.optJSONArray("parts"))
+            when (role) {
+                "user" -> if (text.isNotBlank()) messages += IncomingChatMessage(ChatKind.User, "User", text)
+                "assistant" -> if (text.isNotBlank()) messages += IncomingChatMessage(ChatKind.Assistant, "Assistant", text)
+            }
+        }
+        IncomingEffects(messages = messages, working = false)
+    }.getOrDefault(IncomingEffects())
+}
+
 /** Basic auth header value for the OpenCode server password (RFC 7617). */
 internal fun openCodeAuthHeader(password: String): String {
     val credentials = "opencode:$password"
